@@ -139,20 +139,29 @@ El proyecto consiste en dos sistemas distribuidos que operan simultáneamente:
 
 ### 2.3 Flujo de Información
 
+**Comunicación Local (IPC - dentro del mismo contenedor):**
+- Worker ↔ Agente: Unix Domain Socket para heartbeats
+- Procesos Celery internos: `multiprocessing.Queue` y `Lock` (solo dentro de cada Worker)
+
+**Comunicación Distribuida (TCP - entre contenedores):**
+- Cliente → Master: Sockets TCP (envío de trabajos)
+- Agente → Collector: Sockets TCP (reporte de métricas)
+- Collector → Master: Sockets TCP (notificaciones de alertas)
+
+**Comunicación vía Redis:**
+- Master → Workers: Celery Queue (distribución de chunks)
+- Workers → Redis: Almacenamiento de resultados parciales
+
 ```
-[Cliente] ---(trabajo)---> [Master] ---(chunks)---> [Redis Queue]
-                             ▲                           │
-                             │                           │
-                             │                           ▼
-                             │                      [Workers]
-                             │                           │
-                             │                           │ (IPC)
-                             │                           ▼
-                             │                      [Agentes]
-                             │                           │
-                             │                           │ (métricas)
-                             │                           ▼
-                             └───(alerta)───────── [Collector]
+[Cliente] ---(TCP)---> [Master] ---(Redis)---> [Workers]
+                          ▲                        │
+                          │                        │ (IPC local)
+                          │                        ▼
+                          │                   [Agentes]
+                          │                        │
+                          │                        │ (TCP)
+                          │                        ▼
+                          └──(TCP alerta)──── [Collector]
 ```
 
 ---
@@ -188,7 +197,7 @@ python submit_job.py \
   "pattern": "AGGTCCAT",
   "chunk_size": 51200,
   "file_size": 209715200,
-  "file_data_b64": "base64_encoded_data..."  // O envío por chunks
+  "file_data_b64": "base64_encoded_data..."  // Archivo codificado en base64
 }
 
 // RESPONSE (Master -> Cliente)
@@ -199,6 +208,9 @@ python submit_job.py \
   "estimated_time": 120  // segundos
 }
 ```
+
+**Nota sobre envío de archivos grandes:**
+Para la demo del proyecto, el archivo de 200MB se envía codificado en base64 dentro del JSON (~267MB). Esto es funcional para el alcance académico del proyecto. En un sistema de producción, se implementaría streaming por chunks o upload HTTP multiparte para mayor eficiencia.
 
 **Funcionalidades:**
 - Validar que el archivo existe
@@ -252,9 +264,10 @@ async def main():
     await server.serve_forever()
 
 async def handle_client(reader, writer):
-    data = await reader.read(1024)
+    data = await reader.read(8192)
     message = json.loads(data.decode())
     
+    # Manejar diferentes tipos de mensajes
     if message['type'] == 'submit_job':
         job_id = message['job_id']
         chunks = divide_file(message['file_data'], message['chunk_size'])
@@ -270,6 +283,14 @@ async def handle_client(reader, writer):
         response = {'status': 'accepted', 'job_id': job_id}
         writer.write(json.dumps(response).encode())
         await writer.drain()
+    
+    elif message['type'] == 'worker_down':
+        # Alerta recibida del Collector
+        await handle_worker_down_alert(message)
+    
+    elif message['type'] == 'query_status':
+        # Consulta de estado del cliente
+        await handle_status_query(message, writer)
 ```
 
 **Persistencia en Redis:**
@@ -488,6 +509,7 @@ def send_heartbeat_to_agent():
     """Envía heartbeat al agente local via Unix socket."""
     import socket
     import json
+    import os
     
     worker_id = os.environ.get('WORKER_ID', 'worker1')
     sock_path = f"/tmp/worker_{worker_id}.sock"
@@ -500,8 +522,11 @@ def send_heartbeat_to_agent():
         client.send(json.dumps(message).encode())
         client.close()
     except Exception as e:
-        print(f"Error enviando heartbeat: {e}")
+        # Si el agente no está disponible, el worker continúa procesando
+        print(f"Warning: Error enviando heartbeat: {e}")
 ```
+
+**Nota importante:** El Worker de Celery con `--concurrency=4` lanza 4 procesos hijos. Cada uno puede enviar heartbeats al mismo Unix socket. El Agente, usando `asyncio.start_unix_server()`, acepta múltiples conexiones concurrentes sin problema.
 
 ---
 
@@ -823,15 +848,17 @@ Todos los mensajes entre componentes usan JSON con la siguiente estructura base:
 
 1. **T=0-100s:** Sistema procesando normalmente
 2. **T=100s:** Worker_2 sufre segfault y muere procesando chunk #1537
-3. **T=105s:** Agente_2 intenta enviar heartbeat via IPC, no recibe respuesta
+3. **T=105s:** Agente_2 intenta leer heartbeat via IPC, no recibe respuesta
 4. **T=115s:** Agente_2 marca status = DEAD (15s sin heartbeat)
 5. **T=120s:** Agente_2 reporta al Collector: Status DEAD
 6. **T=121s:** Collector detecta anomalía crítica, genera alerta
 7. **T=122s:** Collector notifica al Master: `worker_down` con worker_id=worker_2
-8. **T=123s:** Master consulta Redis: encuentra 47 tareas asignadas a worker_2 sin completar
-9. **T=124s:** Master re-encola esas 47 tareas (o las marca como "pendientes")
+8. **T=123s:** Master loggea el evento: "Worker 2 detectado como caído"
+9. **T=124s:** Celery, gracias a `ack_late=True`, automáticamente re-encola las tareas que worker_2 no completó
 10. **T=125s:** Workers 1 y 3 (aún vivos) toman las tareas re-encoladas
 11. **T=200s:** Sistema completa procesamiento con 2 workers
+
+**Nota sobre re-encolado:** Celery maneja automáticamente el re-encolado de tareas cuando un worker muere antes de completarlas (configurado con `ack_late=True` y `reject_on_worker_lost=True`). El Master solo necesita registrar el evento para auditoría.
 
 ### 5.3 Diagrama de Secuencia (Submit Job)
 
@@ -1036,6 +1063,7 @@ services:
     command: >
       sh -c "
         python src/monitor_agent.py --worker-id worker1 --collector-host collector &
+        sleep 3
         celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker1@%h
       "
 
@@ -1060,6 +1088,7 @@ services:
     command: >
       sh -c "
         python src/monitor_agent.py --worker-id worker2 --collector-host collector &
+        sleep 3
         celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker2@%h
       "
 
@@ -1084,6 +1113,7 @@ services:
     command: >
       sh -c "
         python src/monitor_agent.py --worker-id worker3 --collector-host collector &
+        sleep 3
         celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker3@%h
       "
 
@@ -1505,11 +1535,16 @@ def find_pattern_kmp(text: str, pattern: str) -> list:
 
 **Situación:** Worker cae con tareas asignadas pero no completadas.
 
-**Estrategia (Simplificada para el proyecto):**
+**Estrategia (Aprovechando features de Celery):**
 
-1. Celery tiene opción `ack_late=True`: Worker confirma tarea DESPUÉS de completarla
-2. Si worker cae antes de completar, Celery automáticamente re-encola
-3. El Master solo necesita trackear qué tareas están "in progress" vs "completed"
+Celery proporciona mecanismos automáticos de re-encolado cuando se configura correctamente:
+
+1. **`ack_late=True`**: Worker confirma tarea DESPUÉS de completarla (no antes)
+2. **`reject_on_worker_lost=True`**: Si worker cae, Celery automáticamente re-encola la tarea
+3. El Master solo necesita:
+   - Recibir notificación del Collector cuando un worker cae
+   - Loggear el evento para auditoría
+   - Opcionalmente, marcar en Redis: `worker:{id}:status = DEAD`
 
 **Implementación:**
 ```python
@@ -1517,10 +1552,28 @@ def find_pattern_kmp(text: str, pattern: str) -> list:
 @app.task(bind=True, ack_late=True, reject_on_worker_lost=True)
 def find_pattern(self, chunk_data, pattern, metadata):
     # Si worker muere aquí, Celery re-encola automáticamente
+    # No necesitamos lógica manual de re-encolado
     ...
 ```
 
-**Nota para IA Developers:** No necesitas implementar re-encolado manual. Usa las features de Celery. El Master solo necesita monitorear el estado.
+**En el Master:**
+```python
+async def handle_worker_down_alert(message):
+    """Maneja alerta de worker caído del Collector."""
+    worker_id = message['worker_id']
+    
+    # Loggear evento
+    logger.warning(f"Worker {worker_id} reportado como caído")
+    
+    # Marcar en Redis
+    redis_client.set(f'worker:{worker_id}:status', 'DEAD')
+    redis_client.set(f'worker:{worker_id}:down_at', time.time())
+    
+    # Celery ya re-encoló las tareas pendientes automáticamente
+    # No necesitamos intervención manual
+```
+
+**Nota para implementación:** El sistema de re-encolado automático de Celery es robusto y bien probado. Para este proyecto académico, aprovechar estas features es más profesional que implementar lógica custom que puede tener bugs.
 
 ### 11.6 Logging Estructurado
 
@@ -2120,23 +2173,3 @@ celery -A src.genome_worker inspect ping
 - **Master:** Servidor coordinador del grid de cómputo
 - **Collector:** Servidor que recolecta métricas de monitoreo
 - **Agente:** Proceso que monitorea un worker local
-
----
-
-## Changelog
-
-**v2.0 (2025-10-30):**
-- Versión definitiva para desarrollo
-- Documentación completa de arquitectura
-- Protocolos de comunicación especificados
-- Docker Compose definido
-- Guías para IAs incluidas
-
-**v1.0 (2025-10-28):**
-- Diseño inicial
-- Concepto de "Director y Vigilante"
-- Requisitos preliminares
-
----
-
-**Este README es el documento maestro del proyecto. Mantenerlo actualizado es crítico para el desarrollo colaborativo y para guiar herramientas de IA en la generación de código.**

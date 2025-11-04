@@ -1,0 +1,233 @@
+<svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg">
+  <!-- Definiciones de estilos y gradientes -->
+  <defs>
+    <style>
+      .component-box { fill: #ffffff; stroke: #2c3e50; stroke-width: 2; }
+      .sistema-a { fill: #e3f2fd; }
+      .sistema-b { fill: #fff3e0; }
+      .tcp-arrow { stroke: #e74c3c; stroke-width: 2; fill: none; marker-end: url(#arrowred); }
+      .ipc-arrow { stroke: #27ae60; stroke-width: 2; fill: none; marker-end: url(#arrowgreen); stroke-dasharray: 5,5; }
+      .redis-arrow { stroke: #9b59b6; stroke-width: 2; fill: none; marker-end: url(#arrowpurple); }
+      .text-title { font-family: Arial, sans-serif; font-size: 14px; font-weight: bold; fill: #2c3e50; }
+      .text-small { font-family: Arial, sans-serif; font-size: 11px; fill: #34495e; }
+      .text-label { font-family: Arial, sans-serif; font-size: 10px; fill: #7f8c8d; }
+      .legend-box { fill: #f8f9fa; stroke: #95a5a6; stroke-width: 1; }
+    </style>
+    
+    <!-- Flechas para diferentes tipos de comunicación -->
+    <marker id="arrowred" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#e74c3c" />
+    </marker>
+    <marker id="arrowgreen" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#27ae60" />
+    </marker>
+    <marker id="arrowpurple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#9b59b6" />
+    </marker>
+  </defs>
+  
+  <!-- Título principal -->
+  <text x="600" y="25" text-anchor="middle" style="font-size: 18px; font-weight: bold; fill: #2c3e50;">
+    Sistema Distribuido de Cómputo y Monitoreo
+  </text>
+  <text x="600" y="45" text-anchor="middle" style="font-size: 12px; fill: #7f8c8d;">
+    Computación II - Análisis Genómico Paralelo con Monitoreo en Tiempo Real
+  </text>
+  
+  <!-- Fondo Sistema A -->
+  <rect x="50" y="70" width="550" height="380" class="sistema-a" rx="10" opacity="0.3"/>
+  <text x="325" y="90" text-anchor="middle" class="text-title" style="font-size: 16px;">
+    SISTEMA A: Grid de Cómputo (El Director)
+  </text>
+  
+  <!-- Fondo Sistema B -->
+  <rect x="630" y="70" width="520" height="380" class="sistema-b" rx="10" opacity="0.3"/>
+  <text x="890" y="90" text-anchor="middle" class="text-title" style="font-size: 16px;">
+    SISTEMA B: Monitoreo (El Vigilante)
+  </text>
+  
+  <!-- SISTEMA A: Cliente CLI -->
+  <rect x="80" y="110" width="140" height="80" class="component-box" rx="5"/>
+  <text x="150" y="135" text-anchor="middle" class="text-title">Cliente CLI</text>
+  <text x="150" y="155" text-anchor="middle" class="text-small">submit_job.py</text>
+  <text x="150" y="170" text-anchor="middle" class="text-label">• Envía archivo</text>
+  <text x="150" y="183" text-anchor="middle" class="text-label">• Patrón de búsqueda</text>
+  
+  <!-- Flecha Cliente -> Master -->
+  <path d="M 150 190 L 150 230" class="tcp-arrow"/>
+  <text x="170" y="210" class="text-label">TCP Socket</text>
+  <text x="170" y="222" class="text-label" style="font-style: italic;">(JSON)</text>
+  
+  <!-- SISTEMA A: Servidor Master -->
+  <rect x="80" y="230" width="140" height="100" class="component-box" rx="5"/>
+  <text x="150" y="250" text-anchor="middle" class="text-title">Servidor Master</text>
+  <text x="150" y="265" text-anchor="middle" class="text-small">master_server.py</text>
+  <text x="150" y="282" text-anchor="middle" class="text-label">• Recibe trabajos</text>
+  <text x="150" y="295" text-anchor="middle" class="text-label">• Divide en chunks</text>
+  <text x="150" y="308" text-anchor="middle" class="text-label">• Encola tareas</text>
+  <text x="150" y="321" text-anchor="middle" class="text-label">• Agrega resultados</text>
+  
+  <!-- SISTEMA A: Redis -->
+  <rect x="280" y="245" width="140" height="90" class="component-box" rx="5" style="fill: #ffe0e0;"/>
+  <text x="350" y="265" text-anchor="middle" class="text-title">Redis Server</text>
+  <text x="350" y="285" text-anchor="middle" class="text-label">• Cola Celery</text>
+  <text x="350" y="298" text-anchor="middle" class="text-label">• Resultados</text>
+  <text x="350" y="311" text-anchor="middle" class="text-label">• Estado de jobs</text>
+  <text x="350" y="324" text-anchor="middle" class="text-label">• Métricas</text>
+  
+  <!-- Flecha Master -> Redis -->
+  <path d="M 220 280 L 280 280" class="redis-arrow"/>
+  <text x="235" y="270" class="text-label">Encola</text>
+  <text x="235" y="295" class="text-label">tareas</text>
+  
+  <!-- SISTEMA A: Workers (3 nodos) -->
+  <g id="worker1">
+    <rect x="80" y="390" width="110" height="75" class="component-box" rx="5"/>
+    <text x="135" y="408" text-anchor="middle" class="text-title">Worker Node 1</text>
+    <rect x="90" y="415" width="90" height="25" style="fill: #d4edda; stroke: #28a745; stroke-width: 1;" rx="3"/>
+    <text x="135" y="430" text-anchor="middle" class="text-small">Celery Worker</text>
+    <text x="135" y="450" text-anchor="middle" class="text-label">Procesa chunks</text>
+  </g>
+  
+  <g id="worker2">
+    <rect x="220" y="390" width="110" height="75" class="component-box" rx="5"/>
+    <text x="275" y="408" text-anchor="middle" class="text-title">Worker Node 2</text>
+    <rect x="230" y="415" width="90" height="25" style="fill: #d4edda; stroke: #28a745; stroke-width: 1;" rx="3"/>
+    <text x="275" y="430" text-anchor="middle" class="text-small">Celery Worker</text>
+    <text x="275" y="450" text-anchor="middle" class="text-label">Procesa chunks</text>
+  </g>
+  
+  <g id="worker3">
+    <rect x="360" y="390" width="110" height="75" class="component-box" rx="5"/>
+    <text x="415" y="408" text-anchor="middle" class="text-title">Worker Node 3</text>
+    <rect x="370" y="415" width="90" height="25" style="fill: #d4edda; stroke: #28a745; stroke-width: 1;" rx="3"/>
+    <text x="415" y="430" text-anchor="middle" class="text-small">Celery Worker</text>
+    <text x="415" y="450" text-anchor="middle" class="text-label">Procesa chunks</text>
+  </g>
+  
+  <!-- Flechas Redis -> Workers -->
+  <path d="M 320 335 L 135 390" class="redis-arrow"/>
+  <path d="M 350 335 L 275 390" class="redis-arrow"/>
+  <path d="M 380 335 L 415 390" class="redis-arrow"/>
+  <text x="240" y="370" class="text-label">Consume tareas</text>
+  
+  <!-- SISTEMA B: Agentes Monitor -->
+  <g id="agente1">
+    <rect x="660" y="270" width="130" height="80" class="component-box" rx="5" style="fill: #fff9e6;"/>
+    <text x="725" y="288" text-anchor="middle" class="text-title">Agente Monitor 1</text>
+    <text x="725" y="303" text-anchor="middle" class="text-small">monitor_agent.py</text>
+    <text x="725" y="320" text-anchor="middle" class="text-label">• Lee métricas</text>
+    <text x="725" y="333" text-anchor="middle" class="text-label">• Heartbeat check</text>
+    <text x="725" y="346" text-anchor="middle" class="text-label">• Reporta CPU/RAM</text>
+  </g>
+  
+  <g id="agente2">
+    <rect x="820" y="270" width="130" height="80" class="component-box" rx="5" style="fill: #fff9e6;"/>
+    <text x="885" y="288" text-anchor="middle" class="text-title">Agente Monitor 2</text>
+    <text x="885" y="303" text-anchor="middle" class="text-small">monitor_agent.py</text>
+    <text x="885" y="320" text-anchor="middle" class="text-label">• Lee métricas</text>
+    <text x="885" y="333" text-anchor="middle" class="text-label">• Heartbeat check</text>
+    <text x="885" y="346" text-anchor="middle" class="text-label">• Reporta CPU/RAM</text>
+  </g>
+  
+  <g id="agente3">
+    <rect x="980" y="270" width="130" height="80" class="component-box" rx="5" style="fill: #fff9e6;"/>
+    <text x="1045" y="288" text-anchor="middle" class="text-title">Agente Monitor 3</text>
+    <text x="1045" y="303" text-anchor="middle" class="text-small">monitor_agent.py</text>
+    <text x="1045" y="320" text-anchor="middle" class="text-label">• Lee métricas</text>
+    <text x="1045" y="333" text-anchor="middle" class="text-label">• Heartbeat check</text>
+    <text x="1045" y="346" text-anchor="middle" class="text-label">• Reporta CPU/RAM</text>
+  </g>
+  
+  <!-- Conexiones IPC Worker <-> Agente -->
+  <path d="M 135 390 L 680 350" class="ipc-arrow" stroke-dasharray="5,5"/>
+  <text x="370" y="355" class="text-label" style="fill: #27ae60;">Unix Socket (IPC)</text>
+  
+  <path d="M 275 390 L 850 350" class="ipc-arrow" stroke-dasharray="5,5"/>
+  <path d="M 415 390 L 1010 350" class="ipc-arrow" stroke-dasharray="5,5"/>
+  
+  <!-- SISTEMA B: Servidor Collector -->
+  <rect x="780" y="140" width="160" height="100" class="component-box" rx="5" style="fill: #ffe6cc;"/>
+  <text x="860" y="160" text-anchor="middle" class="text-title">Servidor Collector</text>
+  <text x="860" y="175" text-anchor="middle" class="text-small">collector_server.py</text>
+  <text x="860" y="192" text-anchor="middle" class="text-label">• Recibe métricas</text>
+  <text x="860" y="205" text-anchor="middle" class="text-label">• Detecta anomalías</text>
+  <text x="860" y="218" text-anchor="middle" class="text-label">• Genera alertas</text>
+  <text x="860" y="231" text-anchor="middle" class="text-label">• Notifica a Master</text>
+  
+  <!-- Flechas Agentes -> Collector -->
+  <path d="M 725 270 L 820 240" class="tcp-arrow"/>
+  <path d="M 885 270 L 860 240" class="tcp-arrow"/>
+  <path d="M 1045 270 L 900 240" class="tcp-arrow"/>
+  <text x="730" y="250" class="text-label">TCP Socket</text>
+  <text x="730" y="262" class="text-label" style="font-style: italic;">(Métricas)</text>
+  
+  <!-- Flecha Collector -> Master (Alerta) -->
+  <path d="M 780 180 Q 500 150 220 250" class="tcp-arrow" stroke-dasharray="8,4"/>
+  <text x="480" y="140" class="text-label" style="fill: #e74c3c; font-weight: bold;">TCP (Alertas)</text>
+  <text x="460" y="155" class="text-label" style="fill: #e74c3c;">Notifica worker caído</text>
+  
+  <!-- Leyenda -->
+  <rect x="50" y="480" width="1100" height="158" class="legend-box" rx="5"/>
+  <text x="600" y="500" text-anchor="middle" class="text-title" style="font-size: 15px;">
+    LEYENDA: Protocolos de Comunicación
+  </text>
+  
+  <!-- Íconos de leyenda -->
+  <line x1="100" y1="520" x2="180" y2="520" class="tcp-arrow"/>
+  <text x="190" y="525" class="text-small">
+    <tspan font-weight="bold">TCP Sockets:</tspan> Comunicación distribuida entre contenedores
+  </text>
+  
+  <line x1="100" y1="545" x2="180" y2="545" class="ipc-arrow"/>
+  <text x="190" y="550" class="text-small">
+    <tspan font-weight="bold">Unix Socket (IPC):</tspan> Comunicación local Worker ↔ Agente (mismo contenedor)
+  </text>
+  
+  <line x1="100" y1="570" x2="180" y2="570" class="redis-arrow"/>
+  <text x="190" y="575" class="text-small">
+    <tspan font-weight="bold">Redis/Celery:</tspan> Cola de tareas distribuidas y persistencia
+  </text>
+  
+  <!-- Información adicional -->
+  <text x="100" y="605" class="text-small" font-weight="bold">Requisitos Cumplidos:</text>
+  <text x="120" y="622" class="text-label">✓ Sockets con múltiples clientes (asyncio.start_server)</text>
+  <text x="120" y="635" class="text-label">✓ Asincronismo I/O (async/await en Master y Collector)</text>
+  
+  <text x="500" y="622" class="text-label">✓ Cola de tareas distribuidas (Celery + Redis)</text>
+  <text x="500" y="635" class="text-label">✓ Mecanismos IPC (Unix Domain Sockets)</text>
+  
+  <text x="860" y="622" class="text-label">✓ Parseo CLI (argparse en todos los componentes)</text>
+  <text x="860" y="635" class="text-label">✓ Docker Compose (6 contenedores orquestados)</text>
+  
+  <!-- Caso de uso -->
+  <rect x="50" y="640" width="1100" height="140" class="legend-box" rx="5"/>
+  <text x="600" y="660" text-anchor="middle" class="text-title" style="font-size: 15px;">
+    CASO DE USO: Análisis Genómico de 200MB
+  </text>
+  
+  <text x="100" y="685" class="text-small" font-weight="bold">Flujo de Datos:</text>
+  <text x="120" y="700" class="text-label">
+    1. Cliente envía archivo genome.txt (200MB) + patrón "AGGTCCAT" al Master
+  </text>
+  <text x="120" y="713" class="text-label">
+    2. Master divide en ~4000 chunks de 50KB y los encola en Redis/Celery
+  </text>
+  <text x="120" y="726" class="text-label">
+    3. Workers consumen chunks, buscan patrón, envían heartbeat cada 5s a su Agente
+  </text>
+  <text x="120" y="739" class="text-label">
+    4. Agentes reportan métricas (CPU, RAM, status) al Collector cada 10s
+  </text>
+  <text x="120" y="752" class="text-label">
+    5. Si un Worker cae (sin heartbeat 15s), Collector alerta al Master → Celery re-encola tareas
+  </text>
+  <text x="120" y="765" class="text-label">
+    6. Master agrega resultados y persiste en Redis: total_matches, processing_time, etc.
+  </text>
+  
+  <!-- Footer -->
+  <text x="600" y="795" text-anchor="middle" class="text-label" style="font-size: 9px;">
+    Tecnologías: Python 3.11+ | asyncio | sockets | Celery | Redis | psutil | Docker | Unix Domain Sockets
+  </text>
+</svg>
