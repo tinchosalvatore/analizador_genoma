@@ -1,0 +1,8 @@
+# Core
+celery==5.3.4
+redis==5.0.1
+psutil==5.9.6
+
+# Opcional (para testing/desarrollo)
+pytest==7.4.3
+pytest-asyncio==0.21.1
