@@ -22,7 +22,7 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
         job_id: ID del trabajo a consultar.
 
     Returns:
-        Un diccionario con la respuesta del servidor.
+        Un diccionario con la respuesta que envio el servidor.
     """
     message = {
         "type": "query_status",
@@ -32,16 +32,18 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
     logger.info(f"Consultando estado del job {job_id} al Master Server...", extra={'job_id': job_id, 'server': f'{server_host}:{server_port}'})
 
     try:
+        # AF_INET: IPv4, SOCK_STREAM: TCP
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((server_host, server_port))
-            sock.sendall(json.dumps(message).encode('utf-8'))
+            sock.connect((server_host, server_port))   # se conecta con el Server Master
+            sock.sendall(json.dumps(message).encode('utf-8'))   # envia la peticion de estado de tarea usando el job_id
             
-            response_data = sock.recv(4096) # Leer la respuesta del servidor
-            response = json.loads(response_data.decode('utf-8'))
+            response_data = sock.recv(4096) # lee la respuesta del servidor
+            response = json.loads(response_data.decode('utf-8'))  #decodifica la respuesta
             
             logger.info(f"Respuesta del Master Server para job {job_id}: {response}", extra={'job_id': job_id, 'response': response})
             return response
 
+    # Manejo de errores de conexión
     except ConnectionRefusedError:
         logger.error(f"Conexión rechazada. Asegúrate de que el Master Server esté corriendo en {server_host}:{server_port}.")
         return {"status": "error", "message": "Conexión rechazada. Master Server no disponible."}
@@ -53,6 +55,8 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
         return {"status": "error", "message": f"Error inesperado: {e}"}
 
 if __name__ == "__main__":
+
+    # permitimos elegir puerto, host y job_id con argparse. Tambien que muestre los resultados finales
     parser = argparse.ArgumentParser(description="Cliente para consultar el estado de un trabajo de análisis genómico.")
     parser.add_argument('--server', type=str, default=MASTER_HOST, help='Dirección IP o hostname del Master Server.')
     parser.add_argument('--port', type=int, default=MASTER_PORT, help='Puerto del Master Server.')
@@ -74,16 +78,16 @@ if __name__ == "__main__":
         processed_chunks = progress.get('processed_chunks', 0)
         percentage = progress.get('percentage', 0.0)
         
+        # cuidado, creo que se calcula dos veces, una en el master y otra aca
         print(f"Progreso: {processed_chunks}/{total_chunks} chunks procesados ({percentage:.2f}%) ")
         
         partial_results = response.get('partial_results', {})
         matches_found = partial_results.get('matches_found', 0)
         print(f"Coincidencias encontradas hasta ahora: {matches_found}")
 
+        # podria escalar a que el Master de mas informacion
         if args.show_results and response.get("status") == "completed":
-            # Aquí se podría añadir lógica para recuperar y mostrar los resultados completos
-            # si el Master Server los almacenara de forma accesible o los devolviera en la respuesta.
-            # Por ahora, el Master solo devuelve el conteo total de matches.
+            
             print("\n--- Resultados Finales ---")
             print(f"Total de coincidencias: {matches_found}")
             print("Nota: La implementación actual del Master Server solo devuelve el conteo total de coincidencias.")

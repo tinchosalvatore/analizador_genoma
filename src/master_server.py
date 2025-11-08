@@ -1,3 +1,4 @@
+import argparse
 import os
 import asyncio
 import json
@@ -145,13 +146,13 @@ class MasterServer:
                 # Encolamos la tarea con Celery, usando de broker a Redis, para que consuman los workers las tareas de ahi
                 
                 # Usamos la tarea directamente de genome worker para evitar problemas de serialización  (find_pattern es del worker)
-                task = find_pattern.delay(chunk_data_b64_for_celery, pattern, metadata) # usamos delay para encolar la tarea
+                task = find_pattern.delay(chunk_data_b64_for_celery, pattern, metadata)
                 task_ids.append(task.id)
                 total_chunks += 1
                 logger.debug(f"Chunk {chunk_id} encolado para job {job_id}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'task_id': task.id})
 
-            # Actualizar el número total de chunks en Redis
-            await self.redis.hset(f"job:{job_id}", "total_chunks", total_chunks)
+            # Actualizar el número total de chunks en Redis. hset actualiza el diccionario en Redis
+            await self.redis.hset(f"job:{job_id}", "total_chunks", total_chunks)   
             
             # Guardar la lista de IDs de tareas en Redis mas su tiempo de expiración
             if task_ids:
@@ -162,7 +163,7 @@ class MasterServer:
             estimated_time = (total_chunks * 0.03) if total_chunks > 0 else 0 # 0.03s por chunk
 
             logger.info(f"Job {job_id} aceptado. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
-            return {   # return de que el trabajo de subio correctamente
+            return {   # return de que el trabajo de subio correctamente a la cola Redis
                 "status": "accepted",
                 "job_id": job_id,
                 "total_chunks": total_chunks,
@@ -179,22 +180,25 @@ class MasterServer:
         job_id = message['job_id']
         logger.info(f"Consulta de estado para job {job_id}", extra={'job_id': job_id})
 
-        job_info = await self.redis.hgetall(f"job:{job_id}")
+        job_info = await self.redis.hgetall(f"job:{job_id}")    # hgetall devuelve un diccionario con todos los jobs encolados
         if not job_info:
             return {"status": "error", "message": "Job ID no encontrado."}
 
         current_status = job_info.get("status", "unknown")
         total_chunks = int(job_info.get("total_chunks", 0))
         
-        # Contar resultados parciales ya guardados
-        processed_chunks = await self.redis.llen(f"job:{job_id}:results")
+        # Contar chunks ya procesados y guardados.
+        # llen devuelve la cantidad de elementos en la lista como length de python
+        processed_chunks = await self.redis.llen(f"job:{job_id}:results")   
         
-        percentage = (processed_chunks / total_chunks * 100) if total_chunks > 0 else 0
 
-        # Calcular resultados parciales (conteo de matches)
+        # Calcular porcentaje de chunks procesados sobre el total
+        percentage = (processed_chunks / total_chunks * 100) if total_chunks > 0 else 0     
+
+
+        # Este bloque sirve para calcular el total de matches con el patron que buscamos
+        # IMPORTANTE: deberiamos poner un contador dentro del Redis para no tener que recorrer la lista cada vez        
         total_matches = 0
-        # Esto podría ser costoso para muchos resultados, se podría optimizar guardando un contador en Redis
-        # Por ahora, leemos todos los resultados y los sumamos
         raw_results = await self.redis.lrange(f"job:{job_id}:results", 0, -1)
         for res_str in raw_results:
             try:
@@ -208,7 +212,8 @@ class MasterServer:
             current_status = "completed"
             await self.redis.hset(f"job:{job_id}", "status", "completed")
             logger.info(f"Job {job_id} marcado como completado.", extra={'job_id': job_id})
-
+ 
+        # respuesta sobre el estado de la tarea
         return {
             "status": current_status,
             "job_id": job_id,
@@ -222,8 +227,9 @@ class MasterServer:
             }
         }
 
+    # Maneja la notificación de un worker caído que manda el Collector.
     async def _handle_worker_down(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Maneja la notificación de un worker caído del Collector."""
+        
         worker_id = message['worker_id']
         timestamp = message['timestamp']
         
@@ -239,18 +245,20 @@ class MasterServer:
         
         return {"status": "acknowledged", "message": f"Alerta de worker {worker_id} recibida."}
 
+        # levantar el servidor Master
     async def run(self):
-        """Inicia el servidor Master."""
         self.redis = await get_redis_client()
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        addr = server.sockets[0].getsockname()
+        addr = server.sockets[0].getsockname()   # obtener la dirección del socket TCP del servidor
         logger.info(f"MasterServer escuchando en {addr}")
 
         async with server:
             await server.serve_forever()
 
+
 if __name__ == "__main__":
-    import argparse
+
+    # permitimos elegir puerto con argparse
     parser = argparse.ArgumentParser(description="Master Server for Genome Analysis.")
     parser.add_argument('--port', type=int, default=MASTER_PORT, help='Port to listen on.')
     args = parser.parse_args()
@@ -258,7 +266,7 @@ if __name__ == "__main__":
     master_server = MasterServer(port=args.port)
     try:
         asyncio.run(master_server.run())
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:  # Ctrl+C
         logger.info("MasterServer detenido por el usuario.")
-    except Exception as e:
+    except Exception as e:   # error inesperado
         logger.critical(f"MasterServer ha terminado con un error crítico: {e}", exc_info=True)
