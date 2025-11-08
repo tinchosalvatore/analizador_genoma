@@ -7,7 +7,7 @@ import socket
 import base64
 from typing import Dict, Any
 
-# Importar configuración y logger
+# Importar configs y el logger
 from src.config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
 from src.utils.logger import setup_logger
 
@@ -17,26 +17,27 @@ logger = setup_logger(f'genome_worker_{WORKER_ID}', f'{os.getenv('LOG_DIR', '/ap
 # Configuración de Celery
 # Usamos el broker y backend de Redis definidos en settings.py
 app = Celery('genome_tasks',
-             broker=f'redis://{REDIS_HOST}:{REDIS_PORT}/0',
-             backend=f'redis://{REDIS_HOST}:{REDIS_PORT}/1')
+             # el /0 y /1 hacen que sean distintas bases de datos logicas, dentro de la misma instancia de Redis
+             broker=f'redis://{REDIS_HOST}:{REDIS_PORT}/0',   # el broker va a funcionar como cola de tareas para los workers
+             backend=f'redis://{REDIS_HOST}:{REDIS_PORT}/1')   # aca se van a almacenar los resultados de las tareas
+                                                                
 
 app.conf.update(
-    task_acks_late=True,              # CRÍTICO para re-encolado
-    task_reject_on_worker_lost=True,  # CRÍTICO para re-encolado
+    task_acks_late=True,              # CRÍTICO para re-encolado de tareas cuando un worker cae
+    task_reject_on_worker_lost=True,  # CRÍTICO para re-encolado de tareas cuando un worker cae
     worker_prefetch_multiplier=2,
     worker_max_tasks_per_child=100
 )
 
-# Cliente Redis para guardar resultados parciales
-# Se inicializa aquí para que cada proceso worker tenga su propia conexión
+# Se inicializa vacio para que cada proceso worker tenga su propia conexión
 redis_client = None
 
+    # Obtiene o inicializa el cliente Redis. Esta funcion la va a ejecutar cada proceso worker
 def get_redis_client():
-    """Obtiene o inicializa el cliente Redis."""
     global redis_client
-    if redis_client is None:
+    if redis_client is None:   # si no hay una conexión establecida con Redis
         try:
-            # Celery ya establece una conexión a Redis para el backend, la reutilizamos.
+            # Reutilizamos la conexión a Redis para el backend, que establecimos antes
             # Esto es más robusto que crear una nueva conexión redis.Redis() en cada proceso.
             redis_client = app.backend.client
             logger.info("Cliente Redis inicializado para el worker.", extra={'redis_host': REDIS_HOST, 'redis_port': REDIS_PORT})
@@ -45,23 +46,25 @@ def get_redis_client():
             raise
     return redis_client
 
+
 def send_heartbeat_to_agent(tasks_completed: int = 0):
     """
-    Envía un heartbeat al agente local via Unix socket.
+    Envía un heartbeat al agente local via Unix socket. Ya que comparten contenedor 
     El WORKER_ID se obtiene de las variables de entorno.
     """
     sock_path = IPC_SOCKET_PATH.format(worker_id=WORKER_ID) # Usar el path del settings
     
     try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        # AF_UNIX indica que es familia Unix y SOCK_STREAM indica que es un socket de conexión 
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  
         client.connect(sock_path)
         
         message = {
-            'type': 'heartbeat',
+            'type': 'heartbeat',  # para despues verificarlo con los protocolos
             'timestamp': time.time(),
             'tasks_completed': tasks_completed
         }
-        client.send(json.dumps(message).encode('utf-8'))
+        client.send(json.dumps(message).encode('utf-8'))   # Enviar en bytes ya que el socket trabaja con bytes
         client.close()
         logger.debug(f"Heartbeat enviado al agente en {sock_path}", extra={'worker_id': WORKER_ID, 'tasks_completed': tasks_completed})
     except FileNotFoundError:
@@ -72,7 +75,8 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
         logger.error(f"Error enviando heartbeat al agente en {sock_path}: {e}", extra={'worker_id': WORKER_ID, 'error': str(e)})
         pass  # El worker debe continuar procesando aunque el agente no esté disponible
 
-@app.task(bind=True, ack_late=True, reject_on_worker_lost=True)
+# creamos una tarea de Celery   (@app = Celery())
+@app.task(bind=True, ack_late=True, reject_on_worker_lost=True)   # mismos parametros que antes, que ayudan a la reencolación de la tarea
 def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, Any]):
     """
     Busca todas las ocurrencias de 'pattern' en 'chunk_data'.
@@ -85,24 +89,24 @@ def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, An
     Returns:
         {
             'chunk_id': int,
-            'matches': int,
-            'positions': [list of positions],  # Posiciones absolutas en el archivo original
+            'matches': int,      # cantidad de veces que se encontro el patrón
+            'positions': [list of positions],  # Posiciones absolutas en el archivo original COMPLETO
             'processing_time': float
         }
     """
-    start_time = time.time()
+    start_time = time.time()   # para luego restarle el tiempo cuando termine
     job_id = metadata.get('job_id', 'unknown_job')
     chunk_id = metadata.get('chunk_id', -1)
-    offset = metadata.get('offset', 0)
+    offset = metadata.get('offset', 0)   # Posicion absoluta en el archivo original
 
     logger.info(f"Iniciando procesamiento de chunk {chunk_id} para job {job_id}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'offset': offset})
 
     try:
-        # Decodificar chunk de base64
+        # Decodificar chunk de base64 a bytes a string
         chunk_data = base64.b64decode(chunk_data_b64)
-        text = chunk_data.decode('utf-8')
+        text = chunk_data.decode('utf-8')   
         
-        # Buscar patrón (usando regex simple)
+        # Busca el patrón (usando regex simple)
         matches = list(re.finditer(pattern, text))
         
         result = {
@@ -124,11 +128,12 @@ def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, An
         else:
             logger.error(f"No se pudo guardar el resultado parcial para job {job_id}, chunk {chunk_id}. Cliente Redis no disponible.")
 
-        # Enviar heartbeat al Agente local via IPC
+        # Enviar heartbeat al Agent local via Unix socket
         send_heartbeat_to_agent(tasks_completed=1) # Reportar 1 tarea completada
         
         return result
 
+    # Excepciones generales.
     except Exception as e:
         logger.error(f"Error procesando chunk {chunk_id} para job {job_id}: {e}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'error': str(e)}, exc_info=True)
         # Re-lanzar la excepción para que Celery la marque como fallida

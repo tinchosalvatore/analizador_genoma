@@ -1,18 +1,19 @@
+import os
 import asyncio
 import json
 import base64
-import uuid
 import time
-import math
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
-import redis.asyncio as aioredis # Usar la versión async de redis-py
+import redis.asyncio as aioredis # Usar la versión async de Redis
 from celery import Celery
 
 from src.config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND
 from src.utils.logger import setup_logger
-from src.utils.protocol import validate_message, MESSAGE_SCHEMAS
-from src.utils.chunker import divide_data_with_overlap # Importar la nueva función
+from src.utils.protocol import validate_message
+from src.utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
+from src.genome_worker import find_pattern
+
 
 # Configurar el logger para el master
 logger = setup_logger('master_server', f'{os.getenv('LOG_DIR', '/app/logs')}/master_server.log')
@@ -20,11 +21,11 @@ logger = setup_logger('master_server', f'{os.getenv('LOG_DIR', '/app/logs')}/mas
 # Configuración de Celery para el Master (solo para encolar tareas)
 celery_app = Celery('master_tasks', broker=CELERY_BROKER, backend=CELERY_BACKEND)
 
-# Cliente Redis asíncrono
-redis_client: aioredis.Redis = None
+# Cliente Redis asíncrono (inicializado en None)
+redis_client: aioredis.Redis | None = None
 
+# Obtiene o inicializa el cliente Redis asíncrono
 async def get_redis_client() -> aioredis.Redis:
-    """Obtiene o inicializa el cliente Redis asíncrono."""
     global redis_client
     if redis_client is None:
         try:
@@ -37,44 +38,51 @@ async def get_redis_client() -> aioredis.Redis:
     return redis_client
 
 class MasterServer:
+# constructor principal, para levantar el servidor
     def __init__(self, host: str = '0.0.0.0', port: int = MASTER_PORT):
         self.host = host
         self.port = port
-        self.redis: aioredis.Redis = None
+        self.redis_client: aioredis.Redis | None = None
         logger.info(f"MasterServer inicializado en {self.host}:{self.port}")
 
+
+        # Maneja las conexiones entrantes de los clientes de manera asincrona
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Maneja las conexiones entrantes de los clientes."""
         addr = writer.get_extra_info('peername')
         logger.info(f"Conexión aceptada de {addr}")
 
         try:
-            # Leer el mensaje completo del cliente
-            # Asumimos que el mensaje JSON no excederá un tamaño razonable para una sola lectura
-            # Para archivos muy grandes, el cliente debería enviar el archivo por partes o usar un mecanismo diferente
+            # Leemos el archivo de entrada del cliente y lo decodificamos
             data = await reader.read(1024 * 1024 * 300) # Leer hasta 300MB (para el archivo base64 de 200MB)
             message_str = data.decode('utf-8')
             message = json.loads(message_str)
 
             msg_type = message.get('type')
+            # validamos el mensaje haciendo uso de nuestros protocolos
             is_valid, error_msg = validate_message(message, msg_type)
 
             if not is_valid:
                 logger.warning(f"Mensaje inválido de {addr}: {error_msg}", extra={'message': message})
                 response = {"status": "error", "message": error_msg}
+            
+            # si el mensaje es valido, puede ser cualquiera de estos casos, voy a tener un handler para cada uno
             elif msg_type == 'submit_job':
                 response = await self._handle_submit_job(message)
             elif msg_type == 'query_status':
                 response = await self._handle_query_status(message)
             elif msg_type == 'worker_down':
                 response = await self._handle_worker_down(message)
+            
+            # error desconocido
             else:
                 logger.warning(f"Tipo de mensaje desconocido de {addr}: {msg_type}", extra={'message': message})
                 response = {"status": "error", "message": f"Tipo de mensaje desconocido: {msg_type}"}
 
-            writer.write(json.dumps(response).encode('utf-8'))
-            await writer.drain()
+            writer.write(json.dumps(response).encode('utf-8'))   # envia la rta correspondiente en formato JSON
+            await writer.drain()   # Envia la respuesta al cliente 
 
+
+        # manejo de errores posibles
         except json.JSONDecodeError:
             logger.error(f"Error de decodificación JSON de {addr}", exc_info=True)
             response = {"status": "error", "message": "Formato JSON inválido."}
@@ -85,13 +93,19 @@ class MasterServer:
             response = {"status": "error", "message": f"Error interno del servidor: {e}"}
             writer.write(json.dumps(response).encode('utf-8'))
             await writer.drain()
+
+        # cierra la conexion con el cliente
         finally:
             logger.info(f"Cerrando conexión con {addr}")
             writer.close()
             await writer.wait_closed()
 
+
+# <=========== HANDLERS ===========>
+
+
+    #Procesa una peticion de trabajo de análisis genómico por parte del cliente
     async def _handle_submit_job(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Procesa un trabajo de análisis genómico."""
         job_id = message['job_id']
         filename = message['filename']
         pattern = message['pattern']
@@ -121,32 +135,34 @@ class MasterServer:
                 "file_size": file_size,
                 "chunk_size": chunk_size
             })
-            await self.redis.expire(f"job:{job_id}", 3600 * 24) # Expira en 24 horas
+
+            await self.redis.expire(f"job:{job_id}", 3600 * 24)   # La tarea se elimina de Redis en 24 horas
 
             for chunk_id, chunk_data, metadata in chunks_generator:
-                # Codificar el chunk de nuevo a base64 para enviarlo a Celery
+                # Codificar el chunk de nuevo a base64 para reencolar las tareas
                 chunk_data_b64_for_celery = base64.b64encode(chunk_data).decode('utf-8')
                 
-                # Encolar la tarea en Celery
-                # Importamos la tarea directamente para evitar problemas de serialización
-                from src.genome_worker import find_pattern
-                task = find_pattern.delay(chunk_data_b64_for_celery, pattern, metadata)
+                # Encolamos la tarea con Celery, usando de broker a Redis, para que consuman los workers las tareas de ahi
+                
+                # Usamos la tarea directamente de genome worker para evitar problemas de serialización  (find_pattern es del worker)
+                task = find_pattern.delay(chunk_data_b64_for_celery, pattern, metadata) # usamos delay para encolar la tarea
                 task_ids.append(task.id)
                 total_chunks += 1
                 logger.debug(f"Chunk {chunk_id} encolado para job {job_id}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'task_id': task.id})
 
             # Actualizar el número total de chunks en Redis
             await self.redis.hset(f"job:{job_id}", "total_chunks", total_chunks)
-            # Guardar la lista de IDs de tareas en Redis
+            
+            # Guardar la lista de IDs de tareas en Redis mas su tiempo de expiración
             if task_ids:
                 await self.redis.rpush(f"job:{job_id}:task_ids", *task_ids)
                 await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24) # Expira en 24 horas
 
-            # Estimación de tiempo (muy básica, se puede mejorar)
-            estimated_time = (total_chunks * 0.03) if total_chunks > 0 else 0 # Asumiendo 0.03s por chunk
+            # Estimación de tiempo de ejecucion, basada en promedio de ejecucion de cada chunk
+            estimated_time = (total_chunks * 0.03) if total_chunks > 0 else 0 # 0.03s por chunk
 
             logger.info(f"Job {job_id} aceptado. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
-            return {
+            return {   # return de que el trabajo de subio correctamente
                 "status": "accepted",
                 "job_id": job_id,
                 "total_chunks": total_chunks,
@@ -158,8 +174,8 @@ class MasterServer:
             await self.redis.delete(f"job:{job_id}", f"job:{job_id}:task_ids", f"job:{job_id}:results")
             return {"status": "error", "message": f"Fallo al procesar el trabajo: {e}"}
 
+# consultas sobre el estado de la tarea por parte del cliente
     async def _handle_query_status(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Consulta el estado de un trabajo."""
         job_id = message['job_id']
         logger.info(f"Consulta de estado para job {job_id}", extra={'job_id': job_id})
 

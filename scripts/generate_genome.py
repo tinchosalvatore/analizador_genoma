@@ -1,10 +1,10 @@
 import random
 import argparse
 
+# Genera archivo de genoma mezclando los 4 tipos de nucleotidos al azar
 def generate_genome(size_mb: int, output_file: str):
-    """Genera archivo de genoma sintético."""
     nucleotides = ['A', 'C', 'G', 'T']    # A = Adenina, C = Citosina, G = Guanina, T = Timina
-    size_bytes = size_mb * 1024 * 1024
+    size_bytes = size_mb * 1024 * 1024    # Calcula cuandos bytes son los MB que ingresamos con el argparse
     
     with open(output_file, 'w') as f:
         # Escribir en líneas de 60 caracteres (formato FASTA)

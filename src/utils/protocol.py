@@ -1,11 +1,17 @@
-import json
 from typing import Any, Dict, Tuple
 
-# Esquemas de validación para los diferentes tipos de mensajes
-# Definiciones basadas en la Sección 4 del README.md
+"""
+Esquemas de validación para los diferentes tipos de mensajes
+Definiciones basadas en la Sección 4 del README.md
+"""
 
+
+# Interfaces genericas de como deberian lucir los mensajes que transitan por el sistema
+# Comunicaciones entre los Workers y Agents. Servidor Master y el Cliente CLI, etc
 MESSAGE_SCHEMAS = {
-    "submit_job": {
+
+    # Peticiones del Cliente CLI
+    "submit_job": {   
         "required": ["type", "job_id", "filename", "pattern", "chunk_size", "file_size", "file_data_b64"],
         "properties": {
             "type": {"type": "string", "enum": ["submit_job"]},
@@ -17,6 +23,8 @@ MESSAGE_SCHEMAS = {
             "file_data_b64": {"type": "string"} # Base64 encoded data
         }
     },
+
+    # Peticion de estado de ejecucion
     "query_status": {
         "required": ["type", "job_id"],
         "properties": {
@@ -24,6 +32,8 @@ MESSAGE_SCHEMAS = {
             "job_id": {"type": "string"} # UUID
         }
     },
+
+    # Almacenamiento en REDIS de metricas + comunicacion entre Workers y Agents
     "metrics": {
         "required": ["type", "data"],
         "properties": {
@@ -43,6 +53,8 @@ MESSAGE_SCHEMAS = {
             }
         }
     },
+
+    # Mensaje despues de que se termina la ejecucion de un Worker
     "worker_down": {
         "required": ["type", "worker_id", "timestamp"],
         "properties": {
@@ -52,6 +64,8 @@ MESSAGE_SCHEMAS = {
             "last_task_id": {"type": "string"} # Opcional
         }
     },
+
+    # Estado de la ejecucion de un Worker
     "heartbeat": {
         "required": ["type", "timestamp"],
         "properties": {
@@ -64,31 +78,31 @@ MESSAGE_SCHEMAS = {
 
 def validate_message(message: Dict[str, Any], message_type: str) -> Tuple[bool, str]:
     """
-    Valida un mensaje JSON contra un esquema predefinido.
+    Valida los mensaje JSON que circulan en el sistema con las interfaces predefinidas.
 
     Args:
-        message: El diccionario del mensaje JSON a validar.
-        message_type: El tipo de mensaje esperado (ej. 'submit_job', 'metrics').
+        message: El diccionario del mensaje JSON a validar (osea el que entra).
+        message_type: El tipo de mensaje esperado, osea con el que se compara (ej. 'submit_job', 'metrics').
 
     Returns:
-        Una tupla (bool, str) donde el booleano indica si es válido y el string
-        contiene un mensaje de error si no es válido, o "OK" si lo es.
+        Una tupla (bool, str) donde el booleano indica si es válido y el string contiene un mensaje de error o "OK"
     """
     schema = MESSAGE_SCHEMAS.get(message_type)
     if not schema:
         return False, f"Esquema de validación no encontrado para el tipo de mensaje: {message_type}"
 
-    # Validar campos requeridos
+    # primero valida por keys, cada campo requerido
     for field in schema.get("required", []):
         if field not in message:
             return False, f"Campo requerido '{field}' ausente en el mensaje de tipo '{message_type}'."
 
-    # Validar propiedades y tipos
+    # Valida propiedades y tipo de dato
     for field, props in schema.get("properties", {}).items():
         if field in message:
             value = message[field]
             expected_type = props.get("type")
             
+            # compara el tipo esperado de dato, con el tipo de dato real, usando la funcion basica "isinstance"
             if expected_type == "string" and not isinstance(value, str):
                 return False, f"Campo '{field}' debe ser de tipo string."
             elif expected_type == "integer" and not isinstance(value, int):
@@ -100,6 +114,7 @@ def validate_message(message: Dict[str, Any], message_type: str) -> Tuple[bool, 
             elif expected_type == "array" and not isinstance(value, list):
                 return False, f"Campo '{field}' debe ser de tipo array."
 
+            # revisa las propiedades adicionales
             if "enum" in props and value not in props["enum"]:
                 return False, f"Campo '{field}' tiene un valor inválido: '{value}'. Valores permitidos: {props["enum"]}."
             
@@ -111,10 +126,10 @@ def validate_message(message: Dict[str, Any], message_type: str) -> Tuple[bool, 
 
             # Si el campo es un objeto anidado (como 'data' en 'metrics'), validarlo recursivamente
             if expected_type == "object" and field == "data" and message_type == "metrics":
-                # Aquí se asume que el esquema para 'data' está directamente en MESSAGE_SCHEMAS['metrics']['data']
-                # y no se llama recursivamente a validate_message con un nuevo message_type.
-                # Se valida directamente contra las propiedades definidas para 'data'.
+                # Se valida directamente con las propiedades definidas para 'data' dentro de 'metrics'
                 data_schema_props = MESSAGE_SCHEMAS["metrics"]["properties"]["data"]
+
+                # valida lo mismo que antes, pero recursivamente dentro del campo 'data'
                 for data_field, data_props in data_schema_props.get("properties", {}).items():
                     if data_field in value:
                         data_value = value[data_field]

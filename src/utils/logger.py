@@ -4,6 +4,8 @@ from datetime import datetime
 import os
 
 class JSONFormatter(logging.Formatter):
+    
+    # Formate el log a un JSON con su formato esperado
     def format(self, record):
         log_obj = {
             'timestamp': datetime.utcnow().isoformat(),
@@ -16,14 +18,14 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_obj['exception'] = self.formatException(record.exc_info)
         
-        # Añadir campos extra si existen
+        # Añade campos extra al log_obj, si es que los traia el log
         if hasattr(record, 'extra_data') and isinstance(record.extra_data, dict):
             log_obj.update(record.extra_data)
 
         return json.dumps(log_obj)
 
 def setup_logger(name: str, log_file: str, level: str = 'INFO'):
-    logger = logging.getLogger(name)
+    logger = logging.getLogger(name)   # inicializamos el logger
     logger.setLevel(level)
 
     # Crear el directorio de logs si no existe
@@ -31,12 +33,12 @@ def setup_logger(name: str, log_file: str, level: str = 'INFO'):
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
     
-    # Eliminar handlers existentes para evitar duplicados
+    # Eliminar handlers existentes genericos para evitar duplicados
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    handler = logging.FileHandler(log_file)
-    handler.setFormatter(JSONFormatter())
+    handler = logging.FileHandler(log_file)   # definimos que handler queremos usar
+    handler.setFormatter(JSONFormatter())    # usamos nuestro propio formateador del handler
     
     logger.addHandler(handler)
     

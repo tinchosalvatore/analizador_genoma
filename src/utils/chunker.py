@@ -1,9 +1,9 @@
-import io
-from typing import Generator, Tuple, Dict, Union
+from typing import Generator, Tuple, Dict
 
 def divide_data_with_overlap(data: bytes, chunk_size: int = 51200, overlap: int = 100) -> Generator[Tuple[int, bytes, Dict[str, any]], None, None]:
     """
     Divide un objeto bytes en chunks de tamaño fijo con un solapamiento (overlap) entre ellos.
+    El solapamiento aplica solo para un chunk posterior.
 
     Args:
         data: Los datos binarios a dividir.
@@ -31,20 +31,21 @@ def divide_data_with_overlap(data: bytes, chunk_size: int = 51200, overlap: int 
         # Asegurarse de no leer más allá del final de los datos
         read_end_index = min(total_size, read_end_index)
         
-        # Extraer el chunk de datos con su posible overlap
+        # Extraer el chunk de datos con su overlap
         chunk_data_with_overlap = data[read_start_index:read_end_index]
         
-        if not chunk_data_with_overlap:
+        if not chunk_data_with_overlap:   # termino
             break
         
         metadata = {
             'chunk_id': chunk_id,
             'offset': read_start_index, # Offset real del inicio de este chunk con overlap
             'size': len(chunk_data_with_overlap),
-            'has_overlap': chunk_id > 0
+            'has_overlap': chunk_id > 0       # si el chunk id no es el primero, entonces si tiene overlap, osea True
         }
         
-        yield chunk_id, chunk_data_with_overlap, metadata
+        # Usamos yield para que devuelva los valores cuando puede, por mas que no sean los 3 al mismo tiempo
+        yield chunk_id, chunk_data_with_overlap, metadata     
         
         # Avanzar el offset para el siguiente chunk por el tamaño del chunk (sin overlap)
         current_offset += chunk_size
@@ -55,6 +56,8 @@ def divide_file_with_overlap(file_path: str, chunk_size: int = 51200, overlap: i
     """
     Divide un archivo en chunks de tamaño fijo con un solapamiento (overlap) entre ellos.
     Lee el archivo completo en memoria para luego dividirlo.
+    
+    Evitamos realizar esta operacion en Disco en el Servidor Master, para no hacer cuello de botella
     """
     with open(file_path, 'rb') as f:
         file_data = f.read()

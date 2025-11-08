@@ -1,5 +1,10 @@
 import os
 
+"""
+Archivo que contiene variables de entorno para la configuración de la aplicación.
+Tambien valores por defecto en caso de no encontrarlas en el archivo .env
+"""
+
 # Configuración de Redis
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
