@@ -1,0 +1,148 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: genome-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - genome-network
+    command: redis-server --appendonly yes
+
+  master:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.master
+    container_name: genome-master
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MASTER_PORT=5000
+      - LOG_DIR=/app/logs
+    depends_on:
+      - redis
+    networks:
+      - genome-network
+    command: python src/master_server.py --port 5000 --redis-host redis --redis-port 6379
+
+  collector:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.collector
+    container_name: genome-collector
+    ports:
+      - "6000:6000"
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    environment:
+      - REDIS_HOST=redis
+      - MASTER_HOST=master
+      - MASTER_PORT=5000
+      - COLLECTOR_PORT=6000
+      - LOG_DIR=/app/logs
+    depends_on:
+      - redis
+      - master
+    networks:
+      - genome-network
+    command: python src/collector_server.py --port 6000 --master-host master --master-port 5000 --redis-host redis --redis-port 6379
+
+  worker1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: genome-worker1
+    volumes:
+      - ./src:/app/src
+      - /tmp/worker1:/tmp  # Para Unix sockets IPC
+      - ./logs:/app/logs
+    environment:
+      - WORKER_ID=worker1
+      - REDIS_HOST=redis
+      - COLLECTOR_HOST=collector
+      - COLLECTOR_PORT=6000
+      - LOG_DIR=/app/logs
+      - IPC_SOCKET_PATH=/tmp/worker_worker1.sock
+    depends_on:
+      - redis
+      - collector
+    networks:
+      - genome-network
+    command: >
+      sh -c "
+        python src/monitor_agent.py --worker-id worker1 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker1.sock &
+        sleep 3
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker1@%h
+      "
+
+  worker2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: genome-worker2
+    volumes:
+      - ./src:/app/src
+      - /tmp/worker2:/tmp
+      - ./logs:/app/logs
+    environment:
+      - WORKER_ID=worker2
+      - REDIS_HOST=redis
+      - COLLECTOR_HOST=collector
+      - COLLECTOR_PORT=6000
+      - LOG_DIR=/app/logs
+      - IPC_SOCKET_PATH=/tmp/worker_worker2.sock
+    depends_on:
+      - redis
+      - collector
+    networks:
+      - genome-network
+    command: >
+      sh -c "
+        python src/monitor_agent.py --worker-id worker2 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker2.sock &
+        sleep 3
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker2@%h
+      "
+
+  worker3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: genome-worker3
+    volumes:
+      - ./src:/app/src
+      - /tmp/worker3:/tmp
+      - ./logs:/app/logs
+    environment:
+      - WORKER_ID=worker3
+      - REDIS_HOST=redis
+      - COLLECTOR_HOST=collector
+      - COLLECTOR_PORT=6000
+      - LOG_DIR=/app/logs
+      - IPC_SOCKET_PATH=/tmp/worker_worker3.sock
+    depends_on:
+      - redis
+      - collector
+    networks:
+      - genome-network
+    command: >
+      sh -c "
+        python src/monitor_agent.py --worker-id worker3 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker3.sock &
+        sleep 3
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker3@%h
+      "
+
+networks:
+  genome-network:
+    driver: bridge
+
+volumes:
+  redis-data:
