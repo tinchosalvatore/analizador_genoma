@@ -1,89 +1,141 @@
+# Versión del Compose. '3.8' es moderna y estable.
 version: '3.8'
 
+# sección principal donde se definen todos los contenedores que componen la aplicación.
+# Cada servicio se ejecuta en su propio contenedor aislado.
 services:
+  # --- Servicio de Redis ---
+  # Redis actúa como el sistema nervioso central para la comunicación indirecta de los contenedores.
+  # 1. Como "Broker" de Celery: El Master encola tareas aquí, y los Workers las recogen.
+  # 2. Como "Backend" de Celery: Los Workers guardan los resultados de las tareas aquí.
+  # 3. Como base de datos de persistencia: El Collector guarda métricas y el Master guarda el estado de los jobs.
   redis:
-    image: redis:7-alpine
-    container_name: genome-redis
+    image: redis:7-alpine      # Redis v7 'alpine' (muy ligera).
+    container_name: genome-redis # Un nombre fijo y legible para el contenedor de Redis.
     ports:
+      # Mapea el puerto 6379 del contenedor al puerto 6379 de la máquina host (mi PC).
+      # Esto te permite conectarte a Redis desde mi máquina si lo necesitas (ej: con un cliente de Redis).
       - "6379:6379"
     volumes:
+      # 'redis-data' es un "volumen nombrado". Docker lo gestiona para persistir los datos de Redis.
+      # Si bajas y levantas los contenedores, los datos de Redis (jobs, resultados) no se pierden.
+      # Redis usa el directorio '/data' para guardar los datos.
       - redis-data:/data
     networks:
+      # Conecta este servicio a la red virtual 'genome-network'.
       - genome-network
+    # este comando asegura que los datos se guarden en disco y sobrevivan a reinicios.
     command: redis-server --appendonly yes
 
+  # --- Servicio del Master Server ---
+  # Es el orquestador principal del sistema de cómputo.
   master:
     build:
-      context: .
-      dockerfile: docker/Dockerfile.master
-    container_name: genome-master
+      context: .               # El contexto de construcción es el directorio actual del proyecto.
+      dockerfile: docker/Dockerfile.master # path al Dockerfile que se usará para construir la imagen
+    container_name: genome-master # Nombre del contenedor para identificarlo facilemente.
     ports:
+      # Mapea el puerto 5000 del contenedor al 5000 del host.
+      # Esto permite que los clientes CLI (submit_job.py) se conecten al Master desde mi máquina.
       - "5000:5000"
     volumes:
+      # "Montaje de código en vivo": Mapea la carpeta 'src' de mi PC a '/app/src' en el contenedor.
+      # ¡IMPORTANTE! Cualquier cambio que hagas en el código fuente se refleja al instante en el contenedor,
+      # sin necesidad de reconstruir la imagen (docker-compose build).
       - ./src:/app/src
+      # Mapea la carpeta 'logs' para que los archivos de log generados dentro del contenedor aparezcan en mi PC.
       - ./logs:/app/logs
     environment:
-      - REDIS_HOST=redis
+      # Variables de entorno para configurar la aplicación dentro del contenedor.
+      - REDIS_HOST=redis       # El host de Redis. 'redis' es el nombre del servicio, Docker lo resuelve a la IP correcta.
       - REDIS_PORT=6379
       - MASTER_PORT=5000
-      - LOG_DIR=/app/logs
+      - LOG_DIR=/app/logs      # Directorio donde se guardarán los logs.
     depends_on:
-      - redis
+      - redis                  # Le dice a Docker Compose que inicie el contenedor de Redis ANTES que el Master.
     networks:
+      # Conecta este servicio a la red virtual 'genome-network'.
       - genome-network
+    
+    # comando para ejecutar el servidor, usamos los argumentos para configurar el puerto y la base de datos
     command: python src/master_server.py --port 5000 --redis-host redis --redis-port 6379
 
+
+  # --- Servicio del Collector Server ---
+  # Es el receptor central del sistema de monitoreo.
   collector:
     build:
       context: .
       dockerfile: docker/Dockerfile.collector
     container_name: genome-collector
     ports:
-      - "6000:6000"
+      - "6000:6000" # Mapea el puerto entre mi PC y el contenedor para que los agentes puedan conectarse.
     volumes:
+        # Montaje de código en vivo: Mapea la carpeta 'src' de mi PC a '/app/src' en el contenedor. 
       - ./src:/app/src
       - ./logs:/app/logs
     environment:
       - REDIS_HOST=redis
-      - MASTER_HOST=master
+      - MASTER_HOST=master     # El Collector necesita saber cómo contactar al Master para enviarle alertas.
       - MASTER_PORT=5000
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
     depends_on:
       - redis
-      - master
+      - master                 # El Collector debe iniciarse después de Redis y el Master.
     networks:
+      # Conecta este servicio a la red virtual 'genome-network'.
       - genome-network
+
+      #usamos los argumentos de CLI de argparse
     command: python src/collector_server.py --port 6000 --master-host master --master-port 5000 --redis-host redis --redis-port 6379
 
+
+# <==========  Workers y Agentes  (estatico, son 3)  ==========>
+
+  # --- Servicio del Worker 1 (y su Agente) ---
+  # Este es un nodo de cómputo. Se definen 3 iguales para simular un pequeño clúster.
   worker1:
     build:
       context: .
-      dockerfile: docker/Dockerfile.worker
+      dockerfile: docker/Dockerfile.worker # Todos los workers usan la misma imagen.
     container_name: genome-worker1
     volumes:
       - ./src:/app/src
-      - /tmp/worker1:/tmp  # Para Unix sockets IPC
+      # Creamos el volumen para el directorio /tmp. Que es donde se guardan los sockets UNIX para el IPC entre
+      # el Agente y el Worker.
+      - /tmp/worker1:/tmp
       - ./logs:/app/logs
     environment:
+      # Variables para configurar este worker específico.
       - WORKER_ID=worker1
       - REDIS_HOST=redis
-      - COLLECTOR_HOST=collector
+      - COLLECTOR_HOST=collector # El Agente necesita saber dónde está el Collector.
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
-      - IPC_SOCKET_PATH=/tmp/worker_worker1.sock
+      - IPC_SOCKET_PATH=/tmp/worker_worker1.sock # Path exacto para el socket de comunicación interna.
     depends_on:
       - redis
       - collector
     networks:
       - genome-network
+  
+    # Script de shell para lanzar los dos procesos en el mismo contenedor (Worker y Agent)
     command: >
       sh -c "
+        # 1. Inicia el Agente Monitor en segundo plano (con '&').
+        # Este agente escuchará los heartbeats del Worker y reportará métricas al Collector.
         python src/monitor_agent.py --worker-id worker1 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker1.sock &
+        # 2. Espera 3 segundos. Es una pausa crucial para dar tiempo al Agente a que cree el archivo de socket Unix.
         sleep 3
+        # 3. Inicia el Worker de Celery. Este es el proceso principal (no está en segundo plano).
+        # Se conectará a Redis para buscar tareas y comenzará a procesar los chunks de genoma.
         celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker1@%h
       "
 
+  # --- Worker 2 y 3 ---
+  # Son copias exactas del worker1, solo cambian sus nombres y IDs para que sean únicos.
+  # Esto demuestra la escalabilidad horizontal del sistema.
   worker2:
     build:
       context: .
@@ -140,9 +192,70 @@ services:
         celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker3@%h
       "
 
-networks:
-  genome-network:
-    driver: bridge
+  worker4:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: genome-worker4
+    volumes:
+      - ./src:/app/src
+      - /tmp/worker4:/tmp
+      - ./logs:/app/logs
+    environment:
+      - WORKER_ID=worker4
+      - REDIS_HOST=redis
+      - COLLECTOR_HOST=collector
+      - COLLECTOR_PORT=6000
+      - LOG_DIR=/app/logs
+      - IPC_SOCKET_PATH=/tmp/worker_worker4.sock
+    depends_on:
+      - redis
+      - collector
+    networks:
+      - genome-network
+    command: >
+      sh -c "
+        python src/monitor_agent.py --worker-id worker4 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker4.sock &
+        sleep 3
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker4@%h
+      "
 
+  worker5:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: genome-worker5
+    volumes:
+      - ./src:/app/src
+      - /tmp/worker5:/tmp
+      - ./logs:/app/logs
+    environment:
+      - WORKER_ID=worker5
+      - REDIS_HOST=redis
+      - COLLECTOR_HOST=collector
+      - COLLECTOR_PORT=6000
+      - LOG_DIR=/app/logs
+      - IPC_SOCKET_PATH=/tmp/worker_worker5.sock
+    depends_on:
+      - redis
+      - collector
+    networks:
+      - genome-network
+    command: >
+      sh -c "
+        python src/monitor_agent.py --worker-id worker5 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker5.sock &
+        sleep 3
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker5@%h
+      "
+
+# 'networks' define las redes virtuales que usarán los servicios.
+networks:
+  # Define la red llamada 'genome-network'. En donde conectamos a todos los servicios previamente
+  # Ahora pueden comunicarse entre sí usando sus nombres de servicio como si fueran DNS.
+  genome-network:
+    driver: bridge # 'bridge' es el driver de red por defecto y más común.
+
+# 'volumes' define los volúmenes que Docker gestionará.
 volumes:
+  # Define el volumen 'redis-data' que usamos para la persistencia de datos.
   redis-data:
