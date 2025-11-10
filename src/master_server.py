@@ -4,6 +4,7 @@ import asyncio
 import json
 import base64
 import time
+import re
 from typing import Dict, Any
 
 import redis.asyncio as aioredis # Usar la versión async de Redis
@@ -13,7 +14,7 @@ from src.config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROK
 from src.utils.logger import setup_logger
 from src.utils.protocol import validate_message
 from src.utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
-from src.genome_worker import find_pattern
+
 
 
 # Configurar el logger para el master
@@ -116,6 +117,29 @@ class MasterServer:
 
         logger.info(f"Job {job_id} recibido: {filename}, patrón: {pattern}", extra={'job_id': job_id, 'filename': filename, 'pattern': pattern, 'file_size': file_size})
 
+        # Validar que el patrón solo contenga nucleótidos válidos
+        if not re.match(r'^[ACGT]+$', pattern):
+            logger.error(f"Patrón inválido recibido para job {job_id}: {pattern}", extra={'job_id': job_id, 'pattern': pattern})
+            return {
+                "status": "error",
+                "message": f"Patrón inválido. Solo se permiten caracteres A, C, G, T. Patrón recibido: {pattern}"
+            }
+
+        # Validar tamaño del patrón (mínimo 2, máximo 100 caracteres)
+        if len(pattern) < 2:
+            logger.error(f"Patrón demasiado corto para job {job_id}: {len(pattern)} caracteres", extra={'job_id': job_id})
+            return {
+                "status": "error",
+                "message": f"El patrón debe tener al menos 2 caracteres. Longitud actual: {len(pattern)}"
+            }
+
+        if len(pattern) > 100:
+            logger.error(f"Patrón demasiado largo para job {job_id}: {len(pattern)} caracteres", extra={'job_id': job_id})
+            return {
+                "status": "error",
+                "message": f"El patrón no puede exceder 100 caracteres. Longitud actual: {len(pattern)}"
+            }
+
         try:
             file_data = base64.b64decode(file_data_b64)
             
@@ -132,6 +156,7 @@ class MasterServer:
                 "pattern": pattern,
                 "total_chunks": 0, # Se actualizará
                 "processed_chunks": 0,
+                "total_matches": 0,
                 "start_time": time.time(),
                 "file_size": file_size,
                 "chunk_size": chunk_size
@@ -145,8 +170,11 @@ class MasterServer:
                 
                 # Encolamos la tarea con Celery, usando de broker a Redis, para que consuman los workers las tareas de ahi
                 
-                # Usamos la tarea directamente de genome worker para evitar problemas de serialización  (find_pattern es del worker)
-                task = find_pattern.delay(chunk_data_b64_for_celery, pattern, metadata)
+                # Usar send_task en lugar de delay para evitar import circular
+                task = celery_app.send_task(
+                    'src.genome_worker.find_pattern',
+                    args=[chunk_data_b64_for_celery, pattern, metadata]
+                )
                 task_ids.append(task.id)
                 total_chunks += 1
                 logger.debug(f"Chunk {chunk_id} encolado para job {job_id}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'task_id': task.id})
@@ -187,9 +215,8 @@ class MasterServer:
         current_status = job_info.get("status", "unknown")
         total_chunks = int(job_info.get("total_chunks", 0))
         
-        # Contar chunks ya procesados y guardados.
-        # llen devuelve la cantidad de elementos en la lista como length de python
-        processed_chunks = await self.redis.llen(f"job:{job_id}:results")   
+        # Leer directamente del hash (ya es atómico)
+        processed_chunks = int(job_info.get("processed_chunks", 0))   
         
 
         # Calcular porcentaje de chunks procesados sobre el total
@@ -198,14 +225,8 @@ class MasterServer:
 
         # Este bloque sirve para calcular el total de matches con el patron que buscamos
         # IMPORTANTE: deberiamos poner un contador dentro del Redis para no tener que recorrer la lista cada vez        
-        total_matches = 0
-        raw_results = await self.redis.lrange(f"job:{job_id}:results", 0, -1)
-        for res_str in raw_results:
-            try:
-                res = json.loads(res_str)
-                total_matches += res.get('matches', 0)
-            except json.JSONDecodeError:
-                logger.warning(f"Resultado parcial corrupto para job {job_id}", extra={'job_id': job_id, 'raw_result': res_str})
+        # Leer contador atómico de matches
+        total_matches = int(job_info.get("total_matches", 0))
 
         # Si todos los chunks han sido procesados y el estado no es "completed", actualizarlo
         if processed_chunks >= total_chunks and total_chunks > 0 and current_status == "processing":
@@ -245,9 +266,64 @@ class MasterServer:
         
         return {"status": "acknowledged", "message": f"Alerta de worker {worker_id} recibida."}
 
+    async def cleanup_old_jobs(self):
+        """
+        Limpia jobs completados después de 1 hora para liberar espacio en Redis.
+        Se ejecuta como tarea en background cada hora.
+        """
+        while True:
+            await asyncio.sleep(3600)  # Cada hora
+            
+            try:
+                logger.info("Iniciando limpieza de jobs antiguos en Redis")
+                
+                # Buscar todos los jobs
+                job_keys = await self.redis.keys("job:*")
+                cleaned_count = 0
+                
+                for key in job_keys:
+                    # Ignorar sub-keys (tasks, results, task_ids)
+                    if ':' not in key or key.endswith(':tasks') or key.endswith(':results') or key.endswith(':task_ids'):
+                        continue
+                    
+                    try:
+                        job_info = await self.redis.hgetall(key)
+                        
+                        # Solo limpiar jobs completados
+                        if job_info.get('status') == 'completed':
+                            start_time = float(job_info.get('start_time', 0))
+                            
+                            # Si tiene más de 1 hora de completado
+                            if time.time() - start_time > 3600:
+                                job_id = key.split(':')[1]
+                                
+                                # Eliminar todas las keys relacionadas
+                                await self.redis.delete(
+                                    f"job:{job_id}",
+                                    f"job:{job_id}:tasks",
+                                    f"job:{job_id}:results",
+                                    f"job:{job_id}:task_ids"
+                                )
+                                
+                                cleaned_count += 1
+                                logger.info(f"Job {job_id} limpiado de Redis (completado hace >1h)", extra={'job_id': job_id})
+                    
+                    except Exception as e:
+                        logger.error(f"Error limpiando job {key}: {e}", extra={'key': key})
+                
+                logger.info(f"Limpieza completada. Jobs eliminados: {cleaned_count}", extra={'cleaned_count': cleaned_count})
+            
+            except Exception as e:
+                logger.error(f"Error en tarea de limpieza de jobs: {e}", exc_info=True)
+
         # levantar el servidor Master
     async def run(self):
         self.redis = await get_redis_client()
+        
+        # Iniciar tarea de limpieza en background
+        logger.info("Iniciando tarea de limpieza de jobs antiguos")
+        asyncio.create_task(self.cleanup_old_jobs())
+        
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         addr = server.sockets[0].getsockname()   # obtener la dirección del socket TCP del servidor
         logger.info(f"MasterServer escuchando en {addr}")

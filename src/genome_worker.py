@@ -11,6 +11,9 @@ from typing import Dict, Any
 from src.config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
 from src.utils.logger import setup_logger
 
+# Variable global para control de heartbeats
+_last_heartbeat_time = 0
+
 # Configurar el logger para el worker
 logger = setup_logger(f'genome_worker_{WORKER_ID}', f'{os.getenv('LOG_DIR', '/app/logs')}/genome_worker_{WORKER_ID}.log')
 
@@ -47,24 +50,35 @@ def get_redis_client():
     return redis_client
 
 
+# Variable global para trackear último heartbeat
+_last_heartbeat_time = 0
+
 def send_heartbeat_to_agent(tasks_completed: int = 0):
     """
-    Envía un heartbeat al agente local via Unix socket. Ya que comparten contenedor 
-    El WORKER_ID se obtiene de las variables de entorno.
+    Envía un heartbeat al agente local via Unix socket.
+    Limitado a 1 heartbeat cada 5 segundos para evitar sobrecarga.
     """
-    sock_path = IPC_SOCKET_PATH.format(worker_id=WORKER_ID) # Usar el path del settings
+    global _last_heartbeat_time
+    
+    # Limitar frecuencia: solo enviar cada 5 segundos
+    current_time = time.time()
+    if current_time - _last_heartbeat_time < 5:
+        return  # Skip este heartbeat
+    
+    _last_heartbeat_time = current_time
+    
+    sock_path = IPC_SOCKET_PATH.format(worker_id=WORKER_ID)
     
     try:
-        # AF_UNIX indica que es familia Unix y SOCK_STREAM indica que es un socket de conexión 
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.connect(sock_path)
         
         message = {
-            'type': 'heartbeat',  # para despues verificarlo con los protocolos
+            'type': 'heartbeat',
             'timestamp': time.time(),
             'tasks_completed': tasks_completed
         }
-        client.send(json.dumps(message).encode('utf-8'))   # Enviar en bytes ya que el socket trabaja con bytes
+        client.send(json.dumps(message).encode('utf-8'))
         client.close()
         logger.debug(f"Heartbeat enviado al agente en {sock_path}", extra={'worker_id': WORKER_ID, 'tasks_completed': tasks_completed})
     except FileNotFoundError:
@@ -73,7 +87,7 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
         logger.warning(f"Conexión al socket del agente rechazada en {sock_path}. El agente podría no estar listo.", extra={'worker_id': WORKER_ID})
     except Exception as e:
         logger.error(f"Error enviando heartbeat al agente en {sock_path}: {e}", extra={'worker_id': WORKER_ID, 'error': str(e)})
-        pass  # El worker debe continuar procesando aunque el agente no esté disponible
+        pass
 
 # creamos una tarea de Celery   (@app = Celery())
 @app.task(bind=True, ack_late=True, reject_on_worker_lost=True)   # mismos parametros que antes, que ayudan a la reencolación de la tarea
@@ -125,6 +139,10 @@ def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, An
                 json.dumps(result)
             )
             logger.info(f"Resultado parcial guardado para job {job_id}, chunk {chunk_id}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'matches': len(matches)})
+            # Incrementar contador atómico de chunks procesados
+            r_client.hincrby(f"job:{job_id}", "processed_chunks", 1)
+            # Incrementar contador atómico de matches encontrados
+            r_client.hincrby(f"job:{job_id}", "total_matches", len(matches))
         else:
             logger.error(f"No se pudo guardar el resultado parcial para job {job_id}, chunk {chunk_id}. Cliente Redis no disponible.")
 

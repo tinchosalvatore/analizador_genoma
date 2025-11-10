@@ -37,6 +37,18 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str,
         return {"status": "error", "message": f"La ruta especificada no es un archivo: {file_path}"}
 
     try:
+        # Validar tamaño del archivo antes de leerlo
+        MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+        file_size_on_disk = os.path.getsize(file_path)
+        
+        if file_size_on_disk > MAX_FILE_SIZE:
+            error_msg = f"Archivo demasiado grande: {file_size_on_disk/(1024*1024):.2f}MB. Máximo permitido: {MAX_FILE_SIZE/(1024*1024):.0f}MB"
+            logger.error(error_msg, extra={'file_path': file_path, 'file_size': file_size_on_disk})
+            return {
+                "status": "error",
+                "message": error_msg
+            }
+        
         with open(file_path, 'rb') as f:
             file_data = f.read()
         

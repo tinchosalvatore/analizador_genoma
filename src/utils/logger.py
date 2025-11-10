@@ -18,9 +18,23 @@ class JSONFormatter(logging.Formatter):
         if record.exc_info:
             log_obj['exception'] = self.formatException(record.exc_info)
         
-        # Añade campos extra al log_obj, si es que los traia el log
-        if hasattr(record, 'extra_data') and isinstance(record.extra_data, dict):
-            log_obj.update(record.extra_data)
+        # Procesar cualquier atributo extra que no sea interno de logging
+        RESERVED_ATTRS = {
+            'name', 'msg', 'args', 'created', 'filename', 'funcName', 'levelname',
+            'levelno', 'lineno', 'module', 'msecs', 'pathname', 'process',
+            'processName', 'relativeCreated', 'thread', 'threadName', 'exc_info',
+            'exc_text', 'stack_info', 'getMessage', 'message'
+        }
+
+        for key, value in record.__dict__.items():
+            if key not in RESERVED_ATTRS and not key.startswith('_'):
+                try:
+                    # Intentar serializar el valor a JSON
+                    json.dumps(value)
+                    log_obj[key] = value
+                except (TypeError, ValueError):
+                    # Si no se puede serializar, convertir a string
+                    log_obj[key] = str(value)
 
         return json.dumps(log_obj)
 

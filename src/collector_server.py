@@ -71,6 +71,11 @@ class CollectorServer:
             json.dumps(metrics)
         )
         
+        # Resetear flag de timeout si el worker vuelve a reportar
+        if worker_id in self.worker_states and 'alerted_timeout' in self.worker_states[worker_id]:
+            del self.worker_states[worker_id]['alerted_timeout']
+            logger.info(f"Worker {worker_id} se recuperó del timeout, flag reseteado", extra={'worker_id': worker_id})
+        
         await self.check_anomalies(worker_id, metrics)   # una vez procesada, buscamos anomalias en el reporte
 
 
