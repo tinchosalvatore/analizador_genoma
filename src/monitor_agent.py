@@ -5,10 +5,11 @@ import psutil
 import socket
 import argparse
 import os
+import struct # Necesario para el empaquetado de encabezados
 
 from src.utils.logger import setup_logger
 
-logger = setup_logger('monitor_agent', f'{os.getenv("LOG_DIR", "/app/logs")}/monitor_agent.log')
+logger = setup_logger('monitor_agent', f'{os.getenv("LOG_DIR", "logs")}/monitor_agent.log')
 
 class MonitorAgent:
     def __init__(self, worker_id: str, collector_host: str, collector_port: int, ipc_socket_path: str):
@@ -56,23 +57,38 @@ class MonitorAgent:
 
     # Recibe heartbeat del worker desde una conexión de socket UNIX
     async def handle_worker_heartbeat(self, conn: socket.socket):
-        loop = asyncio.get_running_loop()  # definimos al Scheduler
+        loop = asyncio.get_running_loop()
         try:
-            # Leer del socket de forma asíncrona
-            data = await loop.sock_recv(conn, 1024)
-            if not data:
-                return
+            # Leer encabezado de 4 bytes para obtener la longitud del mensaje
+            header_data = b''
+            while len(header_data) < 4:
+                packet = await loop.sock_recv(conn, 4 - len(header_data))
+                if not packet:
+                    raise ConnectionError("Conexión cerrada prematuramente por el worker.")
+                header_data += packet
+            
+            message_length = struct.unpack('!I', header_data)[0]
 
-            message = json.loads(data.decode())
+            # Leer el cuerpo del mensaje completo
+            data = b''
+            while len(data) < message_length:
+                packet = await loop.sock_recv(conn, message_length - len(data))
+                if not packet:
+                    raise ConnectionError("Conexión perdida mientras se recibía el heartbeat.")
+                data += packet
+
+            message = json.loads(data.decode('utf-8'))
             if message.get('type') == 'heartbeat':
                 self.last_heartbeat = time.time()
-                if self.status == "DEAD":  # llega un heartbeat a uno que estaba DEAD, entonces ahora está ALIVE
+                if self.status == "DEAD":
                     logger.info(f"Worker {self.worker_id} se ha recuperado (estaba DEAD). Nuevo status: ALIVE")
-                self.status = "ALIVE"   # cambia el estado a ALIVE
+                self.status = "ALIVE"
         except (json.JSONDecodeError, KeyError) as e:
             logger.error(f"Error procesando mensaje de heartbeat: {e}")
+        except Exception as e:
+            logger.error(f"Error inesperado en handle_worker_heartbeat: {e}", exc_info=True)
         finally:
-            conn.close()  # cierra la conexion con el socket del worker
+            conn.close()
 
 
     # Recolecta métricas del sistema y las reporta al Collector.
@@ -98,32 +114,29 @@ class MonitorAgent:
 
         # Envía métricas al Collector via TCP
     async def send_to_collector(self, metrics: dict):
-        loop = asyncio.get_running_loop()   # definimos al Scheduler
+        loop = asyncio.get_running_loop()
         client_socket = None
         try:
-            # IPv4 TCP
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client_socket.setblocking(False)
 
-            # Conectamos los sockets de forma asíncrona
             await loop.sock_connect(client_socket, (self.collector_host, self.collector_port))
             
-            message = {
-                'type': 'metrics',
-                'data': metrics
-            }
+            # El mensaje de métricas es el payload completo
+            message_data = json.dumps(metrics).encode('utf-8')
+            header = struct.pack('!I', len(message_data))
             
-            # Enviamos datos de forma asíncrona
-            await loop.sock_sendall(client_socket, json.dumps(message).encode())
+            await loop.sock_sendall(client_socket, header)
+            await loop.sock_sendall(client_socket, message_data)
             
             logger.info(f"Métricas de {self.worker_id} enviadas al Collector.")
 
         except ConnectionRefusedError:
             logger.error(f"Error enviando al Collector: Conexión rechazada. ¿Está el Collector corriendo en {self.collector_host}:{self.collector_port}?")
         except Exception as e:
-            logger.error(f"Error inesperado enviando al Collector: {e}")
+            logger.error(f"Error inesperado enviando al Collector: {e}", exc_info=True)
         finally:
-            if client_socket:   # si hay una conexión abierta, la cerramos
+            if client_socket:
                 client_socket.close()
 
 

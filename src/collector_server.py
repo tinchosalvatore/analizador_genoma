@@ -5,11 +5,12 @@ import socket
 import time
 import argparse
 import redis
+import struct  # Necesario para el empaquetado de encabezados
 from collections import defaultdict
 
 from src.utils.logger import setup_logger
 
-logger = setup_logger('collector_server', log_file=f'{os.getenv("LOG_DIR", "/app/logs")}/collector_server.log')
+logger = setup_logger('collector_server', log_file=f"{os.getenv('LOG_DIR', 'logs')}/collector_server.log")
 
 class CollectorServer:
     def __init__(self, port: int, master_host: str, master_port: int, redis_host: str, redis_port: int):
@@ -24,27 +25,39 @@ class CollectorServer:
         # Recibe métricas de un agente con socket TCP
     async def handle_agent(self, conn: socket.socket, addr: tuple):
         logger.info(f"Conexión recibida de {addr}")
-        loop = asyncio.get_running_loop()   # definimos al Scheduler
+        loop = asyncio.get_running_loop()
         try:
-            data = await loop.sock_recv(conn, 4096)   # le decimos que vamos a recibir 4096 bytes con socket
-            if not data:
-                return
+            # Leer encabezado de 4 bytes para obtener la longitud del mensaje
+            header_data = b''
+            while len(header_data) < 4:
+                packet = await loop.sock_recv(conn, 4 - len(header_data))
+                if not packet:
+                    raise ConnectionError("Conexión cerrada prematuramente por el agente.")
+                header_data += packet
             
-            message = json.loads(data.decode())    # decodificamos y transformamos a JSON
+            message_length = struct.unpack('!I', header_data)[0]
 
-            # verifica que sea del type metrica
-            if message.get('type') == 'metrics':
-                await self.process_metrics(message['data'])
-            else:
-                logger.warning(f"Mensaje de tipo desconocido recibido de {addr}: {message.get('type')}")
+            # Leer el cuerpo del mensaje completo
+            data = b''
+            while len(data) < message_length:
+                packet = await loop.sock_recv(conn, message_length - len(data))
+                if not packet:
+                    raise ConnectionError("Conexión perdida mientras se recibía el mensaje del agente.")
+                data += packet
+            
+            message = json.loads(data.decode('utf-8'))
+
+            # Asumiendo que el tipo de mensaje siempre es 'metrics' desde el agente
+            # El agente enviará el diccionario de métricas directamente, no anidado en 'data'
+            await self.process_metrics(message)
 
         except json.JSONDecodeError:
             logger.error(f"Error decodificando JSON del agente {addr}.")
         except Exception as e:
-            logger.error(f"Error procesando mensaje del agente {addr}: {e}")
+            logger.error(f"Error procesando mensaje del agente {addr}: {e}", exc_info=True)
         finally:
             logger.info(f"Cerrando conexión con {addr}")
-            conn.close()    # cerramos la conexion
+            conn.close()
 
 
         # Procesa las métricas y detecta anomalías
@@ -85,51 +98,61 @@ class CollectorServer:
             alert = {
                 'severity': 'CRITICAL',
                 'worker_id': worker_id,
-                'message': f'Worker {worker_id} ha dejado de responder (reportado como DEAD por su agente)',
+                'alert_message': f'Worker {worker_id} ha dejado de responder (reportado como DEAD por su agente)',
                 'timestamp': time.time()
             }
             await self.send_alert(alert)
             await self.notify_master(alert)
 
 
-        # Loggea la alerta como CRITICAL o WARNING, ya que es la max emergencia del programa
     async def send_alert(self, alert: dict):
+        """Loggea la alerta como CRITICAL o WARNING, ya que es la max emergencia del programa"""
         log_method = logger.critical if alert['severity'] == 'CRITICAL' else logger.warning
-        log_method(alert['message'], extra=alert)
+        
+        # Crear una copia para no modificar el diccionario original
+        extra_data = alert.copy()
+        # El mensaje principal ya se pasa como primer argumento, lo eliminamos de 'extra'
+        del extra_data['alert_message']
+        
+        log_method(alert['alert_message'], extra=extra_data)
 
 
         # Notifica al Master sobre una alerta crítica
     async def notify_master(self, alert: dict):
-        if alert['severity'] != 'CRITICAL': # si no es una alerta crítica, no hacemos nada
+        if alert['severity'] != 'CRITICAL':
             return
 
         logger.info(f"Notificando al Master sobre la alerta de {alert['worker_id']}")
-        loop = asyncio.get_running_loop()   # definimos al Scheduler
-        client_socket = None
-        try:                # Creamos el socket IPv4, TCP
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.setblocking(False)
-
-            # se conecta con el server master
-            await loop.sock_connect(client_socket, (self.master_host, self.master_port))   
+        
+        message = {
+            'type': 'worker_down',
+            'worker_id': alert['worker_id'],
+            'timestamp': alert['timestamp']
+        }
+        
+        try:
+            # Usar asyncio.open_connection para una API más moderna y simple
+            reader, writer = await asyncio.open_connection(self.master_host, self.master_port)
             
-            message = {
-                'type': 'worker_down',
-                'worker_id': alert['worker_id'],
-                'timestamp': alert['timestamp']
-            }
+            # Convertir mensaje a bytes y crear encabezado
+            message_data = json.dumps(message).encode('utf-8')
+            header = struct.pack('!I', len(message_data))
             
-            # enviamos el msj codificado a bytes
-            await loop.sock_sendall(client_socket, json.dumps(message).encode())  
+            # Enviar encabezado y luego el mensaje
+            writer.write(header)
+            writer.write(message_data)
+            await writer.drain()
+            
             logger.info(f"Notificación enviada al Master para {alert['worker_id']}")
 
         except ConnectionRefusedError:
             logger.error(f"No se pudo notificar al Master. Conexión rechazada en {self.master_host}:{self.master_port}")
         except Exception as e:
-            logger.error(f"Error inesperado notificando al Master: {e}")
+            logger.error(f"Error inesperado notificando al Master: {e}", exc_info=True)
         finally:
-            if client_socket:
-                client_socket.close()   # cerramos la conexion
+            if 'writer' in locals() and not writer.is_closing():
+                writer.close()
+                await writer.wait_closed()
 
 
     # Verifica si algún worker ha dejado de reportar métricas
@@ -144,7 +167,7 @@ class CollectorServer:
                     alert = {
                         'severity': 'CRITICAL',
                         'worker_id': worker_id,
-                        'message': f'Worker {worker_id} no reporta métricas hace más de 30 segundos (timeout).',
+                        'alert_message': f'Worker {worker_id} no reporta métricas hace más de 30 segundos (timeout).',
                         'timestamp': current_time
                     }
 
@@ -174,7 +197,7 @@ class CollectorServer:
             conn, addr = await loop.sock_accept(server_socket) # acepta las conexiones de los Agentes de manera asíncrona
             
             # ejecuta la funcion handle_agent en paralelo para cada agente que se conecta
-            loop.create_task(self.handle_agent(conn, addr)) 
+            loop.create_task(self.handle_agent(conn, addr))
 
 
 def main():
@@ -187,7 +210,7 @@ def main():
     parser.add_argument('--redis-port', type=int, default=6379, help='Puerto de Redis.')
     args = parser.parse_args()
 
-    # iniciamos el servidor usando sus variables de entorno
+    # iniciamos el servidor usando los argumentos de la línea de comandos
     collector = CollectorServer(
         port=args.port,
         master_host=args.master_host,

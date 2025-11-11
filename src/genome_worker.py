@@ -6,16 +6,20 @@ import re
 import socket
 import base64
 from typing import Dict, Any
+import struct # Necesario para el empaquetado de encabezados
 
 # Importar configs y el logger
 from src.config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
 from src.utils.logger import setup_logger
 
+import threading
+from celery.signals import worker_process_init
+
 # Variable global para control de heartbeats
 _last_heartbeat_time = 0
 
 # Configurar el logger para el worker
-logger = setup_logger(f'genome_worker_{WORKER_ID}', f'{os.getenv('LOG_DIR', '/app/logs')}/genome_worker_{WORKER_ID}.log')
+logger = setup_logger(f'genome_worker_{WORKER_ID}', f"{os.getenv('LOG_DIR', 'logs')}/genome_worker_{WORKER_ID}.log")
 
 # Configuración de Celery
 # Usamos el broker y backend de Redis definidos en settings.py
@@ -34,6 +38,21 @@ app.conf.update(
 
 # Se inicializa vacio para que cada proceso worker tenga su propia conexión
 redis_client = None
+
+# --- Heartbeat Thread ---
+def heartbeat_thread():
+    """Hilo que envía un heartbeat cada 10 segundos."""
+    while True:
+        send_heartbeat_to_agent()
+        time.sleep(10)
+
+@worker_process_init.connect
+def on_worker_init(**kwargs):
+    """Se ejecuta cuando un proceso worker de Celery se inicia."""
+    logger.info("Proceso worker inicializado. Iniciando hilo de heartbeat.")
+    hb_thread = threading.Thread(target=heartbeat_thread, daemon=True)
+    hb_thread.start()
+# --- Fin Heartbeat Thread ---
 
     # Obtiene o inicializa el cliente Redis. Esta funcion la va a ejecutar cada proceso worker
 def get_redis_client():
@@ -78,7 +97,12 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
             'timestamp': time.time(),
             'tasks_completed': tasks_completed
         }
-        client.send(json.dumps(message).encode('utf-8'))
+        
+        message_data = json.dumps(message).encode('utf-8')
+        header = struct.pack('!I', len(message_data))
+        
+        client.sendall(header)
+        client.sendall(message_data)
         client.close()
         logger.debug(f"Heartbeat enviado al agente en {sock_path}", extra={'worker_id': WORKER_ID, 'tasks_completed': tasks_completed})
     except FileNotFoundError:
@@ -88,7 +112,6 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
     except Exception as e:
         logger.error(f"Error enviando heartbeat al agente en {sock_path}: {e}", extra={'worker_id': WORKER_ID, 'error': str(e)})
         pass
-
 # creamos una tarea de Celery   (@app = Celery())
 @app.task(bind=True, ack_late=True, reject_on_worker_lost=True)   # mismos parametros que antes, que ayudan a la reencolación de la tarea
 def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, Any]):
