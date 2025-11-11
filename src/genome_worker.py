@@ -13,8 +13,8 @@ from celery.signals import worker_process_init
 
 
 # Importar configs y el logger
-from config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
-from utils.logger import setup_logger
+from src.config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
+from src.utils.logger import setup_logger
 
 # Variable global para control de heartbeats
 _last_heartbeat_time = 0

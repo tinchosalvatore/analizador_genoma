@@ -10,10 +10,10 @@ from typing import Dict, Any
 import redis.asyncio as aioredis # Usar la versión async de Redis
 from celery import Celery
 
-from config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND
-from utils.logger import setup_logger
-from utils.protocol import validate_message
-from utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
+from src.config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND
+from src.utils.logger import setup_logger
+from src.utils.protocol import validate_message
+from src.utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
 
 
 
@@ -48,26 +48,39 @@ class MasterServer:
         logger.info(f"MasterServer inicializado en {self.host}:{self.port}")
 
 
-        # Maneja las conexiones entrantes de los clientes de manera asincrona
+    # Maneja las conexiones entrantes de los clientes de manera asincrona
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
         logger.info(f"Conexión aceptada de {addr}")
 
         try:
-            # Leemos el archivo de entrada del cliente y lo decodificamos
-            data = await reader.read(1024 * 1024 * 300) # Leer hasta 300MB (para el archivo base64 de 200MB)
+            # 1. Bucle de lectura de datos (¡ESTE ES EL ARREGLO!)
+            data_chunks = []
+            while True:
+                chunk = await reader.read(65536) # Leer en chunks de 64KB
+                if not chunk:
+                    # EOF (End-of-File), el cliente notificó que terminó de enviar
+                    break
+                data_chunks.append(chunk)
+            
+            data = b"".join(data_chunks)
+
+            if not data:
+                logger.warning(f"No se recibieron datos de {addr}")
+                return
+
+            # 2. Ahora que tenemos TODOS los datos, decodificamos
             message_str = data.decode('utf-8')
             message = json.loads(message_str)
 
+            # 3. Procesamos el mensaje
             msg_type = message.get('type')
-            # validamos el mensaje haciendo uso de nuestros protocolos
-            is_valid, error_msg = validate_message(message, msg_type)
+            is_valid, error_msg = validate_message(message, msg_type) # Asumo que validate_message está importada
 
             if not is_valid:
                 logger.warning(f"Mensaje inválido de {addr}: {error_msg}", extra={'message': message})
                 response = {"status": "error", "message": error_msg}
             
-            # si el mensaje es valido, puede ser cualquiera de estos casos, voy a tener un handler para cada uno
             elif msg_type == 'submit_job':
                 response = await self._handle_submit_job(message)
             elif msg_type == 'query_status':
@@ -75,28 +88,33 @@ class MasterServer:
             elif msg_type == 'worker_down':
                 response = await self._handle_worker_down(message)
             
-            # error desconocido
             else:
                 logger.warning(f"Tipo de mensaje desconocido de {addr}: {msg_type}", extra={'message': message})
                 response = {"status": "error", "message": f"Tipo de mensaje desconocido: {msg_type}"}
 
-            writer.write(json.dumps(response).encode('utf-8'))   # envia la rta correspondiente en formato JSON
-            await writer.drain()   # Envia la respuesta al cliente 
-
-
-        # manejo de errores posibles
-        except json.JSONDecodeError:
-            logger.error(f"Error de decodificación JSON de {addr}", exc_info=True)
-            response = {"status": "error", "message": "Formato JSON inválido."}
+            # 4. Enviamos la respuesta
             writer.write(json.dumps(response).encode('utf-8'))
             await writer.drain()
+
+
+        # 5. Manejo de errores
+        except json.JSONDecodeError:
+            logger.error(f"Error de decodificación JSON de {addr}. El JSON recibido estaba mal formado o incompleto.", exc_info=True)
+            response = {"status": "error", "message": "Formato JSON inválido."}
+            if not writer.is_closing():
+                writer.write(json.dumps(response).encode('utf-8'))
+                await writer.drain()
         except Exception as e:
             logger.error(f"Error manejando cliente {addr}: {e}", exc_info=True)
             response = {"status": "error", "message": f"Error interno del servidor: {e}"}
-            writer.write(json.dumps(response).encode('utf-8'))
-            await writer.drain()
+            if not writer.is_closing():
+                try:
+                    writer.write(json.dumps(response).encode('utf-8'))
+                    await writer.drain()
+                except Exception as e2:
+                    logger.error(f"Error enviando mensaje de error al cliente {addr}: {e2}")
 
-        # cierra la conexion con el cliente
+        # 6. Cierre final
         finally:
             logger.info(f"Cerrando conexión con {addr}")
             writer.close()
@@ -115,7 +133,8 @@ class MasterServer:
         file_size = message['file_size']
         file_data_b64 = message['file_data_b64']
 
-        logger.info(f"Job {job_id} recibido: {filename}, patrón: {pattern}", extra={'job_id': job_id, 'filename': filename, 'pattern': pattern, 'file_size': file_size})
+        logger.info(f"Job {job_id} recibido: {filename}, patrón: {pattern}", 
+            extra={'job_id': job_id, 'job_filename': filename, 'pattern': pattern, 'file_size': file_size})
 
         # Validar que el patrón solo contenga nucleótidos válidos
         if not re.match(r'^[ACGT]+$', pattern):
@@ -168,6 +187,10 @@ class MasterServer:
                 # Codificar el chunk de nuevo a base64 para reencolar las tareas
                 chunk_data_b64_for_celery = base64.b64encode(chunk_data).decode('utf-8')
                 
+
+                # Añadimos el job_id al metadata antes de enviarlo al worker
+                metadata['job_id'] = job_id
+
                 # Encolamos la tarea con Celery, usando de broker a Redis, para que consuman los workers las tareas de ahi
                 
                 # Usar send_task en lugar de delay para evitar import circular
@@ -202,6 +225,8 @@ class MasterServer:
             # Limpiar Redis si hubo un error
             await self.redis.delete(f"job:{job_id}", f"job:{job_id}:task_ids", f"job:{job_id}:results")
             return {"status": "error", "message": f"Fallo al procesar el trabajo: {e}"}
+        
+    
 
 # consultas sobre el estado de la tarea por parte del cliente
     async def _handle_query_status(self, message: Dict[str, Any]) -> Dict[str, Any]:
