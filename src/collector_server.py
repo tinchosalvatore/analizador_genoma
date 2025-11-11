@@ -7,7 +7,7 @@ import argparse
 import redis
 from collections import defaultdict
 
-from src.utils.logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger('collector_server', log_file=f'{os.getenv("LOG_DIR", "/app/logs")}/collector_server.log')
 

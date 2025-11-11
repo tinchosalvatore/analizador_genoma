@@ -6,7 +6,7 @@ import socket
 import argparse
 import os
 
-from src.utils.logger import setup_logger
+from utils.logger import setup_logger
 
 logger = setup_logger('monitor_agent', f'{os.getenv("LOG_DIR", "/app/logs")}/monitor_agent.log')
 

@@ -5,11 +5,11 @@ import os
 from typing import Dict, Any
 
 # Importar configuración
-from src.config.settings import MASTER_HOST, MASTER_PORT
+from config.settings import MASTER_HOST, MASTER_PORT
 
 # Importar logger (opcional para un cliente CLI simple, pero buena práctica)
-from src.utils.logger import setup_logger
-logger = setup_logger('query_job_client', f'{os.getenv('LOG_DIR', '/app/logs')}/query_job_client.log')
+from utils.logger import setup_logger
+logger = setup_logger('query_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/query_job_client.log')
 
 
 def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[str, Any]:
