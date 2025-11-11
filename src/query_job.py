@@ -37,7 +37,24 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
             sock.connect((server_host, server_port))   # se conecta con el Server Master
             sock.sendall(json.dumps(message).encode('utf-8'))   # envia la peticion de estado de tarea usando el job_id
             
-            response_data = sock.recv(4096) # lee la respuesta del servidor
+            # Señalizamos que hemos terminado de enviar la petición
+            sock.shutdown(socket.SHUT_WR)
+
+            # Para mas robustez, leemos toda la respuesta hasta que el servidor cierre (EOF)
+            response_chunks = []
+            while True:
+                chunk = sock.recv(4096) 
+                if not chunk:
+                    break
+                response_chunks.append(chunk)
+
+
+            response_data = b"".join(response_chunks) # leemos la respuesta del chunk de rta completo del servidor
+
+            if not response_data:
+                logger.error(f"El servidor cerró la conexión sin enviar respuesta.", extra={'job_id': job_id})
+                return {"status": "error", "message": "El servidor cerró la conexión sin enviar respuesta."}
+
             response = json.loads(response_data.decode('utf-8'))  #decodifica la respuesta
             
             logger.info(f"Respuesta del Master Server para job {job_id}: {response}", extra={'job_id': job_id, 'response': response})

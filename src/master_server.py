@@ -129,104 +129,115 @@ class MasterServer:
         job_id = message['job_id']
         filename = message['filename']
         pattern = message['pattern']
-        chunk_size = message.get('chunk_size', 51200) # Default 50KB
         file_size = message['file_size']
-        file_data_b64 = message['file_data_b64']
+        chunk_size = message.get('chunk_size', 51200)
 
-        logger.info(f"Job {job_id} recibido: {filename}, patrón: {pattern}", 
-            extra={'job_id': job_id, 'job_filename': filename, 'pattern': pattern, 'file_size': file_size})
+        logger.info(f"Job {job_id} recibido: {filename}, patrón: {pattern}", extra={'job_id': job_id, 'job_filename': filename, 'pattern': pattern, 'file_size': file_size})
 
-        # Validar que el patrón solo contenga nucleótidos válidos
+        # --- VALIDACIONES RÁPIDAS ---
         if not re.match(r'^[ACGT]+$', pattern):
             logger.error(f"Patrón inválido recibido para job {job_id}: {pattern}", extra={'job_id': job_id, 'pattern': pattern})
             return {
                 "status": "error",
                 "message": f"Patrón inválido. Solo se permiten caracteres A, C, G, T. Patrón recibido: {pattern}"
             }
-
-        # Validar tamaño del patrón (mínimo 2, máximo 100 caracteres)
         if len(pattern) < 2:
             logger.error(f"Patrón demasiado corto para job {job_id}: {len(pattern)} caracteres", extra={'job_id': job_id})
             return {
                 "status": "error",
                 "message": f"El patrón debe tener al menos 2 caracteres. Longitud actual: {len(pattern)}"
             }
-
         if len(pattern) > 100:
             logger.error(f"Patrón demasiado largo para job {job_id}: {len(pattern)} caracteres", extra={'job_id': job_id})
             return {
                 "status": "error",
                 "message": f"El patrón no puede exceder 100 caracteres. Longitud actual: {len(pattern)}"
             }
+        # --- FIN DE VALIDACIONES ---
 
         try:
-            file_data = base64.b64decode(file_data_b64)
-            
-            # Usar la nueva función divide_data_with_overlap
-            chunks_generator = divide_data_with_overlap(file_data, chunk_size=chunk_size)
-            
-            total_chunks = 0
-            task_ids = []
-
-            # Guardar estado inicial del job en Redis
+            # Guardar estado INICIAL del job en Redis (marcarlo como "encolando")
             await self.redis.hset(f"job:{job_id}", mapping={
-                "status": "processing",
+                "status": "queuing", # "queuing" (encolando) es el nuevo estado inicial
                 "filename": filename,
                 "pattern": pattern,
-                "total_chunks": 0, # Se actualizará
+                "total_chunks": 0, # Se actualizará en background
                 "processed_chunks": 0,
                 "total_matches": 0,
                 "start_time": time.time(),
                 "file_size": file_size,
                 "chunk_size": chunk_size
             })
+            await self.redis.expire(f"job:{job_id}", 3600 * 24)   # ttl, se limpia el archivo despues de 24 horas
 
-            await self.redis.expire(f"job:{job_id}", 3600 * 24)   # La tarea se elimina de Redis en 24 horas
+            # Lanzamos el procesamiento pesado de fondo, no esperamos con el cliente a un await
+            asyncio.create_task(self._process_job_background(message))
 
+            # Estimación de tiempo (esto es solo para la respuesta inicial)
+            # (total_chunks_estimate = file_size // chunk_size)
+            total_chunks_estimate = (file_size // chunk_size) + 1
+            estimated_time = (total_chunks_estimate * 0.0013)
+
+            logger.info(f"Job {job_id} aceptado para encolado en background.", extra={'job_id': job_id})
+            
+            # Devolvemos la respuesta INMEDIATAMENTE al cliente
+            return {
+                "status": "accepted",
+                "job_id": job_id,
+                "total_chunks": total_chunks_estimate, # Es una estimación, pero está bien
+                "estimated_time": round(estimated_time, 2)
+            }
+        
+        except Exception as e:
+            logger.error(f"Error procesando submit_job (fase inicial) para {job_id}: {e}", exc_info=True, extra={'job_id': job_id})
+            return {"status": "error", "message": f"Fallo al aceptar el trabajo: {e}"}
+        
+
+    # Esta funcion se ejecuta en segundo plano para no bloquear al cliente mientras se procesan los chunks
+    async def _process_job_background(self, message: Dict[str, Any]):
+        job_id = message['job_id']
+        pattern = message['pattern']
+        chunk_size = message.get('chunk_size', 51200)
+        file_data_b64 = message['file_data_b64']
+        
+        try:
+            # 1. Actualizar estado en Redis a "procesando" (o "encolando")
+            await self.redis.hset(f"job:{job_id}", "status", "processing")
+
+            # 2. Decodificar y hacer el trabajo pesado (esto tarda)
+            file_data = base64.b64decode(file_data_b64)
+            chunks_generator = divide_data_with_overlap(file_data, chunk_size=chunk_size)
+            
+            total_chunks = 0
+            task_ids = []
+
+            # 3. El bucle de encolado (esto es lo que no debe esperar el cliente)
             for chunk_id, chunk_data, metadata in chunks_generator:
-                # Codificar el chunk de nuevo a base64 para reencolar las tareas
                 chunk_data_b64_for_celery = base64.b64encode(chunk_data).decode('utf-8')
                 
-
-                # Añadimos el job_id al metadata antes de enviarlo al worker
+                # Pasamos el job_id al worker
                 metadata['job_id'] = job_id
-
-                # Encolamos la tarea con Celery, usando de broker a Redis, para que consuman los workers las tareas de ahi
                 
-                # Usar send_task en lugar de delay para evitar import circular
                 task = celery_app.send_task(
                     'src.genome_worker.find_pattern',
                     args=[chunk_data_b64_for_celery, pattern, metadata]
                 )
                 task_ids.append(task.id)
                 total_chunks += 1
-                logger.debug(f"Chunk {chunk_id} encolado para job {job_id}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'task_id': task.id})
-
-            # Actualizar el número total de chunks en Redis. hset actualiza el diccionario en Redis
-            await self.redis.hset(f"job:{job_id}", "total_chunks", total_chunks)   
             
-            # Guardar la lista de IDs de tareas en Redis mas su tiempo de expiración
+            # 4. Actualizar Redis con la info final
+            await self.redis.hset(f"job:{job_id}", "total_chunks", total_chunks)
             if task_ids:
                 await self.redis.rpush(f"job:{job_id}:task_ids", *task_ids)
-                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24) # Expira en 24 horas
+                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24)
 
-            # Estimación de tiempo de ejecucion, basada en promedio de ejecucion de cada chunk
-            estimated_time = (total_chunks * 0.03) if total_chunks > 0 else 0 # 0.03s por chunk
+            logger.info(f"Encolado en background completado para job {job_id}. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
 
-            logger.info(f"Job {job_id} aceptado. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
-            return {   # return de que el trabajo de subio correctamente a la cola Redis
-                "status": "accepted",
-                "job_id": job_id,
-                "total_chunks": total_chunks,
-                "estimated_time": round(estimated_time, 2)
-            }
         except Exception as e:
-            logger.error(f"Error procesando submit_job para {job_id}: {e}", exc_info=True, extra={'job_id': job_id})
-            # Limpiar Redis si hubo un error
-            await self.redis.delete(f"job:{job_id}", f"job:{job_id}:task_ids", f"job:{job_id}:results")
-            return {"status": "error", "message": f"Fallo al procesar el trabajo: {e}"}
-        
-    
+            logger.error(f"Error en el procesamiento en background del job {job_id}: {e}", exc_info=True, extra={'job_id': job_id})
+            # Marcar el job como fallido en Redis
+            await self.redis.hset(f"job:{job_id}", "status", "failed")
+            await self.redis.hset(f"job:{job_id}", "error_message", str(e))
 
 # consultas sobre el estado de la tarea por parte del cliente
     async def _handle_query_status(self, message: Dict[str, Any]) -> Dict[str, Any]:
