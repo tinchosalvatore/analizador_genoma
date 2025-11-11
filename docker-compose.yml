@@ -48,7 +48,7 @@ services:
       - REDIS_PORT=6379
       - MASTER_PORT=5000
       - LOG_DIR=/app/logs
-      - PYTHONPATH=/app/src
+      - PYTHONPATH=/app
     depends_on:
       - redis                  # Le dice a Docker Compose que inicie el contenedor de Redis ANTES que el Master.
     networks:
@@ -78,7 +78,7 @@ services:
       - MASTER_PORT=5000
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
-      - PYTHONPATH=/app/src
+      - PYTHONPATH=/app
     depends_on:
       - redis
       - master                 # El Collector debe iniciarse después de Redis y el Master.
@@ -112,7 +112,7 @@ services:
       - COLLECTOR_HOST=collector # El Agente necesita saber dónde está el Collector.
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
-      - PYTHONPATH=/app/src
+      - PYTHONPATH=/app
       - IPC_SOCKET_PATH=/tmp/worker_worker1.sock # Path exacto para el socket de comunicación interna.
     depends_on:
       - redis
@@ -130,7 +130,7 @@ services:
         sleep 3
         # 3. Inicia el Worker de Celery. Este es el proceso principal (no está en segundo plano).
         # Se conectará a Redis para buscar tareas y comenzará a procesar los chunks de genoma.
-        celery -A genome_worker worker --loglevel=info --concurrency=4 --hostname=worker1@%h
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker1@%h
       "
 
   # --- Worker 2 y 3 ---
@@ -151,7 +151,7 @@ services:
       - COLLECTOR_HOST=collector
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
-      - PYTHONPATH=/app/src
+      - PYTHONPATH=/app
       - IPC_SOCKET_PATH=/tmp/worker_worker2.sock
     depends_on:
       - redis
@@ -162,7 +162,7 @@ services:
       sh -c "
         python src/monitor_agent.py --worker-id worker2 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker2.sock &
         sleep 3
-        celery -A genome_worker worker --loglevel=info --concurrency=4 --hostname=worker2@%h
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker2@%h
       "
 
   worker3:
@@ -180,7 +180,7 @@ services:
       - COLLECTOR_HOST=collector
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
-      - PYTHONPATH=/app/src
+      - PYTHONPATH=/app
       - IPC_SOCKET_PATH=/tmp/worker_worker3.sock
     depends_on:
       - redis
@@ -191,7 +191,7 @@ services:
       sh -c "
         python src/monitor_agent.py --worker-id worker3 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker3.sock &
         sleep 3
-        celery -A genome_worker worker --loglevel=info --concurrency=4 --hostname=worker3@%h
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker3@%h
       "
 
   worker4:
@@ -209,7 +209,7 @@ services:
       - COLLECTOR_HOST=collector
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
-      - PYTHONPATH=/app/src
+      - PYTHONPATH=/app
       - IPC_SOCKET_PATH=/tmp/worker_worker4.sock
     depends_on:
       - redis
@@ -220,7 +220,7 @@ services:
       sh -c "
         python src/monitor_agent.py --worker-id worker4 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker4.sock &
         sleep 3
-        celery -A genome_worker worker --loglevel=info --concurrency=4 --hostname=worker4@%h
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker4@%h
       "
 
   worker5:
@@ -238,7 +238,7 @@ services:
       - COLLECTOR_HOST=collector
       - COLLECTOR_PORT=6000
       - LOG_DIR=/app/logs
-      - PYTHONPATH=/app/src
+      - PYTHONPATH=/app
       - IPC_SOCKET_PATH=/tmp/worker_worker5.sock
     depends_on:
       - redis
@@ -249,7 +249,7 @@ services:
       sh -c "
         python src/monitor_agent.py --worker-id worker5 --collector-host collector --collector-port 6000 --ipc-socket-path /tmp/worker_worker5.sock &
         sleep 3
-        celery -A genome_worker worker --loglevel=info --concurrency=4 --hostname=worker5@%h
+        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker5@%h
       "
 
 # 'networks' define las redes virtuales que usarán los servicios.

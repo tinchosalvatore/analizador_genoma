@@ -7,9 +7,9 @@ import base64
 from typing import Dict, Any
 
 # Importar configuración
-from config.settings import MASTER_HOST, MASTER_PORT
+from src.config.settings import MASTER_HOST, MASTER_PORT
 
-from utils.logger import setup_logger
+from src.utils.logger import setup_logger
 
 logger = setup_logger('submit_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/submit_job_client.log')
 
@@ -71,9 +71,20 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str,
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.connect((server_host, server_port))
+
+            # enviamos todos los datos
             sock.sendall(json.dumps(message).encode('utf-8'))
             
+# Notificamos al servidor que terminamos de enviar datos, para que sepa que debe dejar de leer y empezar a procesar.
+            sock.shutdown(socket.SHUT_WR)
+
             response_data = sock.recv(4096) # Leer la respuesta del servidor
+            
+            if not response_data:
+                logger.error("El servidor cerró la conexión sin enviar respuesta.")
+                return {"status": "error", "message": "Sin respuesta del servidor."}
+            
+
             response = json.loads(response_data.decode('utf-8'))
             
             logger.info(f"Respuesta del Master Server para job {job_id}: {response}", extra={'job_id': job_id, 'response': response})
