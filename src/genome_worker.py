@@ -7,6 +7,11 @@ import socket
 import base64
 from typing import Dict, Any
 
+# los usamos para arreglar el tema de los heartbeats
+import threading
+from celery.signals import worker_process_init
+
+
 # Importar configs y el logger
 from config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
 from utils.logger import setup_logger
@@ -88,6 +93,41 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
     except Exception as e:
         logger.error(f"Error enviando heartbeat al agente en {sock_path}: {e}", extra={'worker_id': WORKER_ID, 'error': str(e)})
         pass
+
+
+# para que el heartbeat se mande todo el tiempo, inclusive cuando no se ejcuta una tarea, usamos hilos
+def _heartbeat_thread():
+    """
+    Un hilo que corre en segundo plano y envía un heartbeat cada 5 segundos.
+    Esto mantiene al monitor_agent informado de que el proceso worker está vivo,
+    incluso si está ocioso.
+    """
+    while True:
+        try:
+            # Enviamos un heartbeat con 0 tareas completadas (solo es liveness)
+            # La función 'send_heartbeat_to_agent' ya tiene un rate-limit
+            # interno de 5s, pero dormir aquí es más limpio.
+            send_heartbeat_to_agent(0)
+        except Exception as e:
+            # Loggear, pero nunca dejar que el hilo muera
+            logger.error(f"Error en el hilo de heartbeat: {e}")
+        
+        # Esperar 5 segundos para el próximo latido
+        time.sleep(5)
+
+# esta es la señal que se dispara cuando se inicia un proceso worker, mandando con hilos los heartbeats constantemente
+@worker_process_init.connect
+def on_worker_process_init(**kwargs):
+    """
+    Se ejecuta una vez por cada proceso worker de Celery que se inicia.
+    Aquí es donde lanzamos nuestro hilo de heartbeat.
+    """
+    logger.info("Proceso worker inicializado. Iniciando hilo de heartbeat...")
+    
+    # Iniciar el hilo como 'daemon' para que muera automáticamente
+    # cuando el proceso principal del worker muera.
+    t = threading.Thread(target=_heartbeat_thread, daemon=True)
+    t.start()
 
 # creamos una tarea de Celery   (@app = Celery())
 @app.task(bind=True, ack_late=True, reject_on_worker_lost=True)   # mismos parametros que antes, que ayudan a la reencolación de la tarea
