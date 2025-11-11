@@ -8,14 +8,14 @@ import base64
 from typing import Dict, Any
 
 # Importar configs y el logger
-from src.config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
-from src.utils.logger import setup_logger
+from config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
+from utils.logger import setup_logger
 
 # Variable global para control de heartbeats
 _last_heartbeat_time = 0
 
 # Configurar el logger para el worker
-logger = setup_logger(f'genome_worker_{WORKER_ID}', f'{os.getenv('LOG_DIR', '/app/logs')}/genome_worker_{WORKER_ID}.log')
+logger = setup_logger(f'genome_worker_{WORKER_ID}', f'{os.getenv("LOG_DIR", "/app/logs")}/genome_worker_{WORKER_ID}.log')
 
 # Configuración de Celery
 # Usamos el broker y backend de Redis definidos en settings.py

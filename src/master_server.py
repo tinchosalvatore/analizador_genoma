@@ -10,15 +10,15 @@ from typing import Dict, Any
 import redis.asyncio as aioredis # Usar la versión async de Redis
 from celery import Celery
 
-from src.config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND
-from src.utils.logger import setup_logger
-from src.utils.protocol import validate_message
-from src.utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
+from config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND
+from utils.logger import setup_logger
+from utils.protocol import validate_message
+from utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
 
 
 
 # Configurar el logger para el master
-logger = setup_logger('master_server', f'{os.getenv('LOG_DIR', '/app/logs')}/master_server.log')
+logger = setup_logger('master_server', f'{os.getenv("LOG_DIR", "/app/logs")}/master_server.log')
 
 # Configuración de Celery para el Master (solo para encolar tareas)
 celery_app = Celery('master_tasks', broker=CELERY_BROKER, backend=CELERY_BACKEND)

@@ -7,11 +7,11 @@ import base64
 from typing import Dict, Any
 
 # Importar configuración
-from src.config.settings import MASTER_HOST, MASTER_PORT
+from config.settings import MASTER_HOST, MASTER_PORT
 
-# Importar logger (opcional para un cliente CLI simple, pero buena práctica)
-from src.utils.logger import setup_logger
-logger = setup_logger('submit_job_client', f'{os.getenv('LOG_DIR', '/app/logs')}/submit_job_client.log')
+from utils.logger import setup_logger
+
+logger = setup_logger('submit_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/submit_job_client.log')
 
 
 def submit_job(server_host: str, server_port: int, file_path: str, pattern: str, chunk_size: int) -> Dict[str, Any]:

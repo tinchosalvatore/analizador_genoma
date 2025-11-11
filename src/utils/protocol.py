@@ -116,13 +116,13 @@ def validate_message(message: Dict[str, Any], message_type: str) -> Tuple[bool, 
 
             # revisa las propiedades adicionales
             if "enum" in props and value not in props["enum"]:
-                return False, f"Campo '{field}' tiene un valor inválido: '{value}'. Valores permitidos: {props["enum"]}."
+                return False, f"Campo '{field}' tiene un valor inválido: '{value}'. Valores permitidos: {props['enum']}."
             
             if "minimum" in props and isinstance(value, (int, float)) and value < props["minimum"]:
-                return False, f"Campo '{field}' debe ser mayor o igual a {props["minimum"]}."
+                return False, f"Campo '{field}' debe ser mayor o igual a {props['minimum']}."
             
             if "maximum" in props and isinstance(value, (int, float)) and value > props["maximum"]:
-                return False, f"Campo '{field}' debe ser menor o igual a {props["maximum"]}."
+                return False, f"Campo '{field}' debe ser menor o igual a {props['maximum']}."
 
             # Si el campo es un objeto anidado (como 'data' en 'metrics'), validarlo recursivamente
             if expected_type == "object" and field == "data" and message_type == "metrics":
@@ -143,13 +143,13 @@ def validate_message(message: Dict[str, Any], message_type: str) -> Tuple[bool, 
                             return False, f"Campo 'data.{data_field}' debe ser de tipo numérico."
 
                         if "enum" in data_props and data_value not in data_props["enum"]:
-                            return False, f"Campo 'data.{data_field}' tiene un valor inválido: '{data_value}'. Valores permitidos: {data_props["enum"]}."
+                            return False, f"Campo 'data.{data_field}' tiene un valor inválido: '{data_value}'. Valores permitidos: {data_props['enum']}."
                         
                         if "minimum" in data_props and isinstance(data_value, (int, float)) and data_value < data_props["minimum"]:
-                            return False, f"Campo 'data.{data_field}' debe ser mayor o igual a {data_props["minimum"]}."
+                            return False, f"Campo 'data.{data_field}' debe ser mayor o igual a {data_props['minimum']}."
                         
                         if "maximum" in data_props and isinstance(data_value, (int, float)) and data_value > data_props["maximum"]:
-                            return False, f"Campo 'data.{data_field}' debe ser menor o igual a {data_props["maximum"]}."
+                            return False, f"Campo 'data.{data_field}' debe ser menor o igual a {data_props['maximum']}."
 
 
     return True, "OK"
