@@ -19,6 +19,10 @@ COLLECTOR_PORT = int(os.getenv('COLLECTOR_PORT', 6000))
 ALERT_THRESHOLD_CPU = int(os.getenv('ALERT_THRESHOLD_CPU', 95))
 ALERT_THRESHOLD_MEMORY = int(os.getenv('ALERT_THRESHOLD_MEMORY', 90))
 
+# Configuración de Chunks
+DEFAULT_CHUNK_SIZE = int(os.getenv('DEFAULT_CHUNK_SIZE', 1048576)) # 1MB
+
+
 # Configuración del Worker
 WORKER_ID = os.getenv('WORKER_ID', 'worker1') # Default para desarrollo local
 CELERY_BROKER = os.getenv('CELERY_BROKER', f'redis://{REDIS_HOST}:{REDIS_PORT}/0')

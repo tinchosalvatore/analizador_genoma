@@ -7,7 +7,7 @@ import base64
 from typing import Dict, Any
 
 # Importar configuración
-from src.config.settings import MASTER_HOST, MASTER_PORT
+from src.config.settings import MASTER_HOST, MASTER_PORT, DEFAULT_CHUNK_SIZE
 
 from src.utils.logger import setup_logger
 
@@ -106,7 +106,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=MASTER_PORT, help='Puerto del Master Server.')
     parser.add_argument('--file', type=str, required=True, help='Ruta al archivo de genoma a analizar.')
     parser.add_argument('--pattern', type=str, required=True, help='Patrón de ADN a buscar (ej: AGGTCCAT).')
-    parser.add_argument('--chunk-size', type=int, default=51200, help='Tamaño de los chunks en bytes (por defecto: 51200 = 50KB).')
+    parser.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE, help=f'Tamaño de los chunks en bytes (por defecto: {DEFAULT_CHUNK_SIZE} = 1MB).')
     
     args = parser.parse_args()
 

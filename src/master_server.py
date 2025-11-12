@@ -10,7 +10,7 @@ from typing import Dict, Any
 import redis.asyncio as aioredis # Usar la versión async de Redis
 from celery import Celery
 
-from src.config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND
+from src.config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND, DEFAULT_CHUNK_SIZE
 from src.utils.logger import setup_logger
 from src.utils.protocol import validate_message
 from src.utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
@@ -133,7 +133,7 @@ class MasterServer:
         filename = message['filename']
         pattern = message['pattern']
         file_size = message['file_size']
-        chunk_size = message.get('chunk_size', 51200)
+        chunk_size = message.get('chunk_size', DEFAULT_CHUNK_SIZE)
 
         logger.info(f"Job {job_id} recibido: {filename}, patrón: {pattern}", extra={'job_id': job_id, 'job_filename': filename, 'pattern': pattern, 'file_size': file_size})
 
@@ -203,7 +203,7 @@ class MasterServer:
     async def _process_job_background(self, message: Dict[str, Any]):
         job_id = message['job_id']
         pattern = message['pattern']
-        chunk_size = message.get('chunk_size', 51200)
+        chunk_size = message.get('chunk_size', DEFAULT_CHUNK_SIZE)
         file_data_b64 = message['file_data_b64']
         
         try:

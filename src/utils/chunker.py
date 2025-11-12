@@ -1,6 +1,7 @@
 from typing import Generator, Tuple, Dict
+from src.config.settings import DEFAULT_CHUNK_SIZE
 
-def divide_data_with_overlap(data: bytes, chunk_size: int = 51200, overlap: int = 100) -> Generator[Tuple[int, bytes, Dict[str, any]], None, None]:
+def divide_data_with_overlap(data: bytes, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = 100) -> Generator[Tuple[int, bytes, Dict[str, any]], None, None]:
     """
     Divide un objeto bytes en chunks de tamaño fijo con un solapamiento (overlap) entre ellos.
     El solapamiento aplica solo para un chunk posterior.
@@ -52,7 +53,7 @@ def divide_data_with_overlap(data: bytes, chunk_size: int = 51200, overlap: int 
         chunk_id += 1
 
 # Mantener la función original para compatibilidad si se usa con file_path
-def divide_file_with_overlap(file_path: str, chunk_size: int = 51200, overlap: int = 100) -> Generator[Tuple[int, bytes, Dict[str, any]], None, None]:
+def divide_file_with_overlap(file_path: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = 100) -> Generator[Tuple[int, bytes, Dict[str, any]], None, None]:
     """
     Divide un archivo en chunks de tamaño fijo con un solapamiento (overlap) entre ellos.
     Lee el archivo completo en memoria para luego dividirlo.
