@@ -35,7 +35,7 @@ app.conf.update(
     task_acks_late=True,              # CRÍTICO para re-encolado de tareas cuando un worker cae
     task_reject_on_worker_lost=True,  # CRÍTICO para re-encolado de tareas cuando un worker cae
     worker_prefetch_multiplier=2,
-    worker_max_tasks_per_child=100
+    worker_max_tasks_per_child=2000
 )
 
 # Se inicializa vacio para que cada proceso worker tenga su propia conexión
@@ -82,6 +82,9 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
     
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        
+        client.settimeout(1.0)
+        
         client.connect(sock_path)
         
         message = {
@@ -200,5 +203,11 @@ def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, An
     # Excepciones generales.
     except Exception as e:
         logger.error(f"Error procesando chunk {chunk_id} para job {job_id}: {e}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'error': str(e)}, exc_info=True)
+        
+
+        global redis_client
+        redis_client = None
+        logger.warning(f"Cliente Redis destruido para job {job_id} debido a un error. Se re-creará en el próximo reintento.", extra={'job_id': job_id, 'chunk_id': chunk_id})
+
         # Re-lanzar la excepción para que Celery la marque como fallida
         raise
