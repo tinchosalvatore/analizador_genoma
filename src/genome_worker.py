@@ -2,6 +2,7 @@ from celery import Celery
 import os
 import json
 import time
+import redis
 import re
 import socket
 import base64
@@ -43,15 +44,20 @@ redis_client = None
     # Obtiene o inicializa el cliente Redis. Esta funcion la va a ejecutar cada proceso worker
 def get_redis_client():
     global redis_client
-    if redis_client is None:   # si no hay una conexión establecida con Redis
+    # Cuando un nuevo proceso worker es "forkeado", redis_client será None OTRA VEZ.
+    if redis_client is None:
         try:
-            # Reutilizamos la conexión a Redis para el backend, que establecimos antes
-            # Esto es más robusto que crear una nueva conexión redis.Redis() en cada proceso.
-            redis_client = app.backend.client
-            logger.info("Cliente Redis inicializado para el worker.", extra={'redis_host': REDIS_HOST, 'redis_port': REDIS_PORT})
+            # Creamos una conexión NUEVA para este proceso worker específico.
+            # Nos conectamos a la DB 1 (igual que el Master).
+            redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
+            redis_client.ping() # Verificar conexión
+            logger.info(f"Cliente Redis (db=1) NUEVO inicializado para el proceso worker.", extra={'redis_host': REDIS_HOST, 'redis_port': REDIS_PORT})
+        
         except Exception as e:
-            logger.error(f"Error al inicializar el cliente Redis para el worker: {e}")
+            logger.error(f"Error al inicializar el NUEVO cliente Redis (db=1) para el worker: {e}")
             raise
+    
+    # Las siguientes llamadas EN ESTE MISMO PROCESO reusarán esta conexión
     return redis_client
 
 

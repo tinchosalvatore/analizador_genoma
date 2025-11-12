@@ -27,15 +27,18 @@ celery_app = Celery('master_tasks', broker=CELERY_BROKER, backend=CELERY_BACKEND
 redis_client: aioredis.Redis | None = None
 
 # Obtiene o inicializa el cliente Redis asíncrono
+# En src/master_server.py
+
 async def get_redis_client() -> aioredis.Redis:
     global redis_client
     if redis_client is None:
         try:
-            redis_client = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            # Forzamos al Master a usar la DB 1, la misma que usa el backend de Celery (y el worker).
+            redis_client = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
             await redis_client.ping() # Verificar conexión
-            logger.info("Cliente Redis asíncrono inicializado para el Master.", extra={'redis_host': REDIS_HOST, 'redis_port': REDIS_PORT})
+            logger.info("Cliente Redis asíncrono inicializado para el Master (DB 1).", extra={'redis_host': REDIS_HOST, 'redis_port': REDIS_PORT})
         except Exception as e:
-            logger.error(f"Error al inicializar el cliente Redis asíncrono para el Master: {e}")
+            logger.error(f"Error al inicializar el cliente Redis asíncrono para el Master (DB 1): {e}")
             raise
     return redis_client
 
@@ -155,13 +158,16 @@ class MasterServer:
             }
         # --- FIN DE VALIDACIONES ---
 
+        # intento de solucionar el bug de condicion de carrera
+        total_chunks_estimate = (file_size // chunk_size) + 1
+
         try:
             # Guardar estado INICIAL del job en Redis (marcarlo como "encolando")
             await self.redis.hset(f"job:{job_id}", mapping={
                 "status": "queuing", # "queuing" (encolando) es el nuevo estado inicial
                 "filename": filename,
                 "pattern": pattern,
-                "total_chunks": 0, # Se actualizará en background
+                "total_chunks": total_chunks_estimate, # Se actualizará en background
                 "processed_chunks": 0,
                 "total_matches": 0,
                 "start_time": time.time(),
@@ -201,10 +207,47 @@ class MasterServer:
         file_data_b64 = message['file_data_b64']
         
         try:
-            # 1. Actualizar estado en Redis a "procesando" (o "encolando")
+            # 1. Actualizar estado en Redis (rápido, no bloquea)
             await self.redis.hset(f"job:{job_id}", "status", "processing")
 
+            # 2. ¡¡¡AQUÍ ESTÁ EL ARREGLO!!!
+            # Ejecutamos la función bloqueante en un hilo separado.
+            # El 'await' aquí solo espera a que el hilo termine,
+            # pero el event loop principal (servidor) sigue LIBRE.
+            total_chunks, task_ids = await asyncio.to_thread(
+                self._blocking_enqueue_work,
+                job_id,
+                pattern,
+                chunk_size,
+                file_data_b64
+            )
+            
+            if total_chunks == -1: # Error en el hilo
+                raise Exception("Falló el _blocking_enqueue_work")
+
+            # 3. Actualizar Redis con la info final (rápido, no bloquea)
+            # (Nota: La línea 'hset("total_chunks")' ya la quitamos en el paso anterior, ¡lo cual es correcto!)
+            if task_ids:
+                await self.redis.rpush(f"job:{job_id}:task_ids", *task_ids)
+                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24)
+
+            logger.info(f"Encolado en background (async) completado para job {job_id}. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
+
+        except Exception as e:
+            logger.error(f"Error en el procesamiento en background del job {job_id}: {e}", exc_info=True, extra={'job_id': job_id})
+            # Marcar el job como fallido en Redis
+            await self.redis.hset(f"job:{job_id}", "status", "failed")
+            await self.redis.hset(f"job:{job_id}", "error_message", str(e))
+
+
+    def _blocking_enqueue_work(self, job_id: str, pattern: str, chunk_size: int, file_data_b64: str) -> int:
+        """
+        Función síncrona que hace todo el trabajo pesado de CPU
+        (decodificar, dividir, encolar) para ser ejecutada en un hilo separado.
+        """
+        try:
             # 2. Decodificar y hacer el trabajo pesado (esto tarda)
+            logger.info(f"Iniciando decodificación (bloqueante) para job {job_id}", extra={'job_id': job_id})
             file_data = base64.b64decode(file_data_b64)
             chunks_generator = divide_data_with_overlap(file_data, chunk_size=chunk_size)
             
@@ -212,6 +255,7 @@ class MasterServer:
             task_ids = []
 
             # 3. El bucle de encolado (esto es lo que no debe esperar el cliente)
+            logger.info(f"Iniciando bucle de encolado (bloqueante) para job {job_id}", extra={'job_id': job_id})
             for chunk_id, chunk_data, metadata in chunks_generator:
                 chunk_data_b64_for_celery = base64.b64encode(chunk_data).decode('utf-8')
                 
@@ -225,24 +269,30 @@ class MasterServer:
                 task_ids.append(task.id)
                 total_chunks += 1
             
-            # 4. Actualizar Redis con la info final
-            await self.redis.hset(f"job:{job_id}", "total_chunks", total_chunks)
+            # Devolver los resultados para que la parte async los escriba
+            logger.info(f"Encolado bloqueante completado para job {job_id}. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
+            
+            # Devolvemos los task_ids para que redis los guarde
             if task_ids:
-                await self.redis.rpush(f"job:{job_id}:task_ids", *task_ids)
-                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24)
+                # Nota: Este 'redis' es síncrono. ¡Necesitamos pasarlo o crearlo!
+                # Para simplificar, devolvemos solo los task_ids y total_chunks
+                pass
 
-            logger.info(f"Encolado en background completado para job {job_id}. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
+            return total_chunks, task_ids
 
         except Exception as e:
-            logger.error(f"Error en el procesamiento en background del job {job_id}: {e}", exc_info=True, extra={'job_id': job_id})
-            # Marcar el job como fallido en Redis
-            await self.redis.hset(f"job:{job_id}", "status", "failed")
-            await self.redis.hset(f"job:{job_id}", "error_message", str(e))
+            logger.error(f"Error en _blocking_enqueue_work para job {job_id}: {e}", exc_info=True, extra={'job_id': job_id})
+            # Devolvemos -1 o algo para indicar error
+            return -1, []
+
+
 
 # consultas sobre el estado de la tarea por parte del cliente
     async def _handle_query_status(self, message: Dict[str, Any]) -> Dict[str, Any]:
         job_id = message['job_id']
         logger.info(f"Consulta de estado para job {job_id}", extra={'job_id': job_id})
+
+        logger.info(f"¡¡¡PRUEBA DE NUEVO CÓDIGO!!! Job {job_id}")
 
         job_info = await self.redis.hgetall(f"job:{job_id}")    # hgetall devuelve un diccionario con todos los jobs encolados
         if not job_info:

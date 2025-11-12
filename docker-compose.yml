@@ -23,6 +23,11 @@ services:
       - genome-network
     # este comando asegura que los datos se guarden en disco y sobrevivan a reinicios.
     command: redis-server --appendonly yes
+    healthcheck:  
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
 
   # --- Servicio del Master Server ---
   # Es el orquestador principal del sistema de cómputo.
@@ -50,7 +55,8 @@ services:
       - LOG_DIR=/app/logs
       - PYTHONPATH=/app
     depends_on:
-      - redis                  # Le dice a Docker Compose que inicie el contenedor de Redis ANTES que el Master.
+      redis:  # le dice que espere a que el servicio 'redis' se inicie.
+        condition: service_healthy
     networks:
       # Conecta este servicio a la red virtual 'genome-network'.
       - genome-network
