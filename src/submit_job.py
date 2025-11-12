@@ -38,7 +38,7 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str,
 
     try:
         # Validar tamaño del archivo antes de leerlo
-        MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+        MAX_FILE_SIZE = 501 * 1024 * 1024  # 500MB
         file_size_on_disk = os.path.getsize(file_path)
         
         if file_size_on_disk > MAX_FILE_SIZE:
