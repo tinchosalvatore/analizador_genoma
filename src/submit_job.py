@@ -69,13 +69,31 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str,
 
         logger.info(f"Enviando trabajo {job_id} al Master Server...", extra={'job_id': job_id, 'server': f'{server_host}:{server_port}'})
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((server_host, server_port))
+        # Obtener todas las direcciones posibles (IPv4 e IPv6)
+        addrs = socket.getaddrinfo(server_host, server_port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        
+        sock = None
+        for family, socktype, proto, canonname, sockaddr in addrs:
+            try:
+                sock = socket.socket(family, socktype, proto)
+                sock.connect(sockaddr)
+                logger.info(f"Conectado a Master Server en {sockaddr} usando {family}", extra={'job_id': job_id, 'sockaddr': sockaddr, 'family': family})
+                break # Conexión exitosa
+            except OSError as e:
+                logger.warning(f"Fallo al conectar a {sockaddr}: {e}")
+                if sock:
+                    sock.close()
+                sock = None
+        
+        if sock is None:
+            logger.error(f"No se pudo conectar a {server_host}:{server_port} en ninguna dirección disponible.")
+            return {"status": "error", "message": "No se pudo conectar al Master Server."}
 
+        with sock: # Usar el socket conectado
             # enviamos todos los datos
             sock.sendall(json.dumps(message).encode('utf-8'))
             
-# Notificamos al servidor que terminamos de enviar datos, para que sepa que debe dejar de leer y empezar a procesar.
+            # Notificamos al servidor que terminamos de enviar datos, para que sepa que debe dejar de leer y empezar a procesar.
             sock.shutdown(socket.SHUT_WR)
 
             response_data = sock.recv(4096) # Leer la respuesta del servidor

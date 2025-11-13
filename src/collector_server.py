@@ -22,17 +22,25 @@ class CollectorServer:
 
         
         # Recibe métricas de un agente con socket TCP
-    async def handle_agent(self, conn: socket.socket, addr: tuple):
+    async def handle_agent(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        addr = writer.get_extra_info('peername')
         logger.info(f"Conexión recibida de {addr}")
-        loop = asyncio.get_running_loop()   # definimos al Scheduler
+        
+        data = b""
         try:
-            data = await loop.sock_recv(conn, 4096)   # le decimos que vamos a recibir 4096 bytes con socket
-            if not data:
-                return
-            
-            message = json.loads(data.decode())    # decodificamos y transformamos a JSON
+            # Leemos los datos en chunks para manejar mensajes grandes
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                data += chunk
 
-            # verifica que sea del type metrica
+            if not data:
+                logger.warning(f"No se recibieron datos de {addr}")
+                return
+
+            message = json.loads(data.decode())
+
             if message.get('type') == 'metrics':
                 await self.process_metrics(message['data'])
             else:
@@ -44,7 +52,8 @@ class CollectorServer:
             logger.error(f"Error procesando mensaje del agente {addr}: {e}")
         finally:
             logger.info(f"Cerrando conexión con {addr}")
-            conn.close()    # cerramos la conexion
+            writer.close()
+            await writer.wait_closed()
 
 
         # Procesa las métricas y detecta anomalías
@@ -104,23 +113,42 @@ class CollectorServer:
             return
 
         logger.info(f"Notificando al Master sobre la alerta de {alert['worker_id']}")
-        loop = asyncio.get_running_loop()   # definimos al Scheduler
-        client_socket = None
-        try:                # Creamos el socket IPv4, TCP
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.setblocking(False)
+        
+        reader, writer = None, None
+        try:
+            # Obtener todas las direcciones posibles (IPv4 e IPv6)
+            addrs = await asyncio.get_event_loop().getaddrinfo(
+                self.master_host, self.master_port, socket.AF_UNSPEC, socket.SOCK_STREAM
+            )
 
-            # se conecta con el server master
-            await loop.sock_connect(client_socket, (self.master_host, self.master_port))   
+            # Intentar conectar a cada dirección hasta que una funcione
+            connected = False
+            for family, socktype, proto, canonname, sockaddr in addrs:
+                try:
+                    reader, writer = await asyncio.open_connection(
+                        host=sockaddr[0], port=sockaddr[1], family=family
+                    )
+                    connected = True
+                    logger.info(f"Conectado a Master Server en {sockaddr} usando {family}", extra={'sockaddr': sockaddr, 'family': family})
+                    break
+                except OSError as e:
+                    logger.warning(f"Fallo al conectar a {sockaddr}: {e}")
+                    if writer:
+                        writer.close()
+                        await writer.wait_closed()
+                    reader, writer = None, None
             
+            if not connected:
+                raise ConnectionRefusedError(f"No se pudo conectar al Master Server en {self.master_host}:{self.master_port}")
+
             message = {
                 'type': 'worker_down',
                 'worker_id': alert['worker_id'],
                 'timestamp': alert['timestamp']
             }
             
-            # enviamos el msj codificado a bytes
-            await loop.sock_sendall(client_socket, json.dumps(message).encode())  
+            writer.write(json.dumps(message).encode())
+            await writer.drain()
             logger.info(f"Notificación enviada al Master para {alert['worker_id']}")
 
         except ConnectionRefusedError:
@@ -128,8 +156,9 @@ class CollectorServer:
         except Exception as e:
             logger.error(f"Error inesperado notificando al Master: {e}")
         finally:
-            if client_socket:
-                client_socket.close()   # cerramos la conexion
+            if writer:
+                writer.close()
+                await writer.wait_closed()
 
 
     # Verifica si algún worker ha dejado de reportar métricas
@@ -156,25 +185,19 @@ class CollectorServer:
 
     # Inicia el servidor collector
     async def run(self):
-        loop = asyncio.get_running_loop()
-        
-        # Iniciamos el socket TCP para que pueda recibir conexiones
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setblocking(False)  # no bloqueante (espera en segundo plano)
-        server_socket.bind(('0.0.0.0', self.port))   # fijamos al host 0.0.0.0
-        server_socket.listen()   # indicamos que es solo de escucha
-        
-        addr = server_socket.getsockname()
-        logger.info(f'Collector Server escuchando en {addr}')
-        
         # Iniciar el monitor de timeouts en paralelo
-        loop.create_task(self.monitor_timeouts())
+        asyncio.create_task(self.monitor_timeouts())
+        
+        # Usar asyncio.start_server para escuchar en todas las interfaces (IPv4 e IPv6)
+        server = await asyncio.start_server(self.handle_agent, None, self.port)
+        
+        # Log all bound addresses
+        for sock in server.sockets:
+            addr = sock.getsockname()
+            logger.info(f'Collector Server escuchando en {addr}')
 
-        while True:
-            conn, addr = await loop.sock_accept(server_socket) # acepta las conexiones de los Agentes de manera asíncrona
-            
-            # ejecuta la funcion handle_agent en paralelo para cada agente que se conecta
-            loop.create_task(self.handle_agent(conn, addr)) 
+        async with server:
+            await server.serve_forever() 
 
 
 def main():

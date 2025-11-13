@@ -44,8 +44,8 @@ async def get_redis_client() -> aioredis.Redis:
 
 class MasterServer:
 # constructor principal, para levantar el servidor
-    def __init__(self, host: str = '0.0.0.0', port: int = MASTER_PORT):
-        self.host = host
+    def __init__(self, host: str | list[str] | None = None, port: int = MASTER_PORT):
+        self.host = host if host is not None else ['0.0.0.0', '::'] # Listen on all IPv4 and IPv6 interfaces
         self.port = port
         self.redis_client: aioredis.Redis | None = None
         logger.info(f"MasterServer inicializado en {self.host}:{self.port}")

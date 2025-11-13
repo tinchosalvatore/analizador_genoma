@@ -2,6 +2,7 @@ import argparse
 import socket
 import json
 import os
+from pathlib import Path
 from typing import Dict, Any
 
 # Importar configuración
@@ -32,9 +33,27 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
     logger.info(f"Consultando estado del job {job_id} al Master Server...", extra={'job_id': job_id, 'server': f'{server_host}:{server_port}'})
 
     try:
-        # AF_INET: IPv4, SOCK_STREAM: TCP
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((server_host, server_port))   # se conecta con el Server Master
+        # Obtener todas las direcciones posibles (IPv4 e IPv6)
+        addrs = socket.getaddrinfo(server_host, server_port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        
+        sock = None
+        for family, socktype, proto, canonname, sockaddr in addrs:
+            try:
+                sock = socket.socket(family, socktype, proto)
+                sock.connect(sockaddr)
+                logger.info(f"Conectado a Master Server en {sockaddr} usando {family}", extra={'job_id': job_id, 'sockaddr': sockaddr, 'family': family})
+                break # Conexión exitosa
+            except OSError as e:
+                logger.warning(f"Fallo al conectar a {sockaddr}: {e}")
+                if sock:
+                    sock.close()
+                sock = None
+        
+        if sock is None:
+            logger.error(f"No se pudo conectar a {server_host}:{server_port} en ninguna dirección disponible.")
+            return {"status": "error", "message": "No se pudo conectar al Master Server."}
+
+        with sock: # Usar el socket conectado
             sock.sendall(json.dumps(message).encode('utf-8'))   # envia la peticion de estado de tarea usando el job_id
             
             # Señalizamos que hemos terminado de enviar la petición
@@ -71,6 +90,106 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
         logger.error(f"Ocurrió un error inesperado: {e}", exc_info=True)
         return {"status": "error", "message": f"Error inesperado: {e}"}
 
+def generate_html_report(job_id: str, response: Dict[str, Any]) -> str:
+    status = response.get('status', 'N/A').upper()
+    progress = response.get('progress', {})
+    total_chunks = progress.get('total_chunks', 0)
+    processed_chunks = progress.get('processed_chunks', 0)
+    percentage = progress.get('percentage', 0.0)
+    matches_found = response.get('partial_results', {}).get('matches_found', 0)
+
+    # Determine status icon and color
+    status_icon = ""
+    status_color = ""
+    if status == "COMPLETED":
+        status_icon = "✅"
+        status_color = "green"
+    elif status == "QUEUING":
+        status_icon = "⏳"
+        status_color = "orange"
+    elif status == "PROCESSING":
+        status_icon = "🔄"
+        status_color = "blue"
+    elif status == "FAILED":
+        status_icon = "❌"
+        status_color = "red"
+    else:
+        status_icon = "❓"
+        status_color = "gray"
+
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reporte de Estado del Job: {job_id}</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f4f7f6; color: #333; }}
+        .container {{ max-width: 800px; margin: auto; background: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }}
+        h1 {{ color: #0056b3; text-align: center; margin-bottom: 25px; }}
+        .job-id {{ font-size: 1.2em; font-weight: bold; color: #555; margin-bottom: 20px; text-align: center; }}
+        .status-section {{ background-color: #e9ecef; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 5px solid {status_color}; }}
+        .status-section p {{ margin: 5px 0; font-size: 1.1em; }}
+        .status-section .status-value {{ font-weight: bold; color: {status_color}; }}
+        .progress-bar-container {{ width: 100%; background-color: #e0e0e0; border-radius: 5px; overflow: hidden; margin-top: 10px; }}
+        .progress-bar {{ height: 25px; background-color: #4CAF50; width: {percentage}%; text-align: center; line-height: 25px; color: white; font-weight: bold; border-radius: 5px; }}
+        .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 20px; }}
+        .info-item {{ background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #dee2e6; }}
+        .info-item h3 {{ color: #0056b3; margin-top: 0; font-size: 1em; }}
+        .info-item p {{ margin: 0; font-size: 0.9em; }}
+        .footer {{ text-align: center; margin-top: 30px; font-size: 0.8em; color: #777; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Reporte de Estado del Trabajo</h1>
+        <p class="job-id">ID del Trabajo: <code>{job_id}</code></p>
+        
+        <div class="status-section">
+            <p><strong>Estado Actual:</strong> <span class="status-value">{status_icon} {status}</span></p>
+            <p><strong>Mensaje:</strong> 
+    """
+    if status == "COMPLETED":
+        html_content += f"El trabajo {job_id} ha sido completado exitosamente."
+    elif status == "QUEUING":
+        html_content += f"El trabajo {job_id} ha sido aceptado y está en cola para procesamiento."
+    elif status == "PROCESSING":
+        html_content += f"El trabajo {job_id} está actualmente en procesamiento."
+    elif status == "FAILED":
+        html_content += f"El trabajo {job_id} ha fallado. Por favor, revise los logs del servidor."
+    else:
+        html_content += f"Estado desconocido para el trabajo {job_id}."
+    
+    html_content += f"""
+            </p>
+        </div>
+
+        <div class="info-grid">
+            <div class="info-item">
+                <h3>Progreso</h3>
+                <p>Chunks Procesados: {processed_chunks}</p>
+                <p>Total de Chunks: {total_chunks if total_chunks > 0 else 'Aún no determinado'}</p>
+                <p>Porcentaje: {percentage:.2f}%</p>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" style="width: {percentage:.2f}%;">{"{:.2f}%".format(percentage)}</div>
+                </div>
+            </div>
+            <div class="info-item">
+                <h3>Resultados Parciales</h3>
+                <p>Coincidencias Encontradas: {matches_found}</p>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Reporte generado por el cliente de consulta de estado.</p>
+        </div>
+    </div>
+</body>
+</html>
+    """
+    return html_content
+
 if __name__ == "__main__":
 
     # permitimos elegir puerto, host y job_id con argparse. Tambien que muestre los resultados finales
@@ -79,33 +198,67 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=MASTER_PORT, help='Puerto del Master Server.')
     parser.add_argument('--job-id', type=str, required=True, help='ID del trabajo a consultar.')
     parser.add_argument('--show-results', action='store_true', help='Muestra los resultados finales si el trabajo está completado.')
+    parser.add_argument('--output-html', type=str, help='Genera un reporte HTML del estado del trabajo en el archivo especificado.')
     
     args = parser.parse_args()
 
     response = query_job_status(args.server, args.port, args.job_id)
 
     if response.get("status") == "error":
-        print(f"Error al consultar el estado del job: {response.get('message', 'Unknown error')}")
+        print(f"\n❌ Error al consultar el estado del job: {response.get('message', 'Unknown error')}")
     else:
-        print(f"Job ID: {response.get('job_id')}")
-        print(f"Status: {response.get('status', 'N/A').upper()}")
-        
+        job_id = response.get('job_id')
+        status = response.get('status', 'N/A').upper()
         progress = response.get('progress', {})
         total_chunks = progress.get('total_chunks', 0)
         processed_chunks = progress.get('processed_chunks', 0)
         percentage = progress.get('percentage', 0.0)
-        
-        # cuidado, creo que se calcula dos veces, una en el master y otra aca
-        print(f"Progreso: {processed_chunks}/{total_chunks} chunks procesados ({percentage:.2f}%) ")
-        
-        partial_results = response.get('partial_results', {})
-        matches_found = partial_results.get('matches_found', 0)
-        print(f"Coincidencias encontradas hasta ahora: {matches_found}")
+        matches_found = response.get('partial_results', {}).get('matches_found', 0)
 
-        # podria escalar a que el Master de mas informacion
-        if args.show_results and response.get("status") == "completed":
-            
-            print("\n--- Resultados Finales ---")
-            print(f"Total de coincidencias: {matches_found}")
-            print("Nota: La implementación actual del Master Server solo devuelve el conteo total de coincidencias.")
-            print("Para ver las posiciones exactas, se necesitaría una lógica adicional en el Master y en este cliente.")
+        print(f"\n📊 Estado del Trabajo: {job_id}")
+        print(f"------------------------------------")
+        print(f"  Estado Actual: {status}")
+        
+        if total_chunks > 0:
+            # Barra de progreso simple
+            bar_length = 20
+            filled_length = int(bar_length * percentage // 100)
+            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+            print(f"  Progreso:    [{bar}] {percentage:.2f}% ({processed_chunks}/{total_chunks} chunks)")
+        else:
+            print(f"  Progreso:    {processed_chunks} chunks procesados (Total de chunks aún no determinado)")
+        
+        print(f"  Coincidencias Encontradas: {matches_found}")
+
+        if status == "COMPLETED":
+            print(f"\n✅ ¡Trabajo {job_id} completado exitosamente!")
+            if args.show_results:
+                print("\n--- Resultados Finales ---")
+                print(f"Total de coincidencias: {matches_found}")
+                print("Nota: La implementación actual del Master Server solo devuelve el conteo total de coincidencias.")
+                print("Para ver las posiciones exactas, se necesitaría una lógica adicional en el Master y en este cliente.")
+        elif status == "QUEUING":
+            print(f"\n⏳ El trabajo {job_id} ha sido aceptado y está en cola para procesamiento.")
+        elif status == "PROCESSING":
+            print(f"\n🔄 El trabajo {job_id} está actualmente en procesamiento.")
+        elif status == "FAILED":
+            print(f"\n❌ El trabajo {job_id} ha fallado. Por favor, revise los logs del servidor.")
+        else:
+            print(f"\n❓ Estado desconocido para el trabajo {job_id}.")
+
+        # Generar reporte HTML si se solicita y el trabajo está completado
+        if args.output_html and status == "COMPLETED":
+            try:
+                html_report_content = generate_html_report(job_id, response)
+                
+                report_dir = Path("reportes")
+                report_dir.mkdir(parents=True, exist_ok=True) # Crear el directorio si no existe
+                
+                output_path = report_dir / args.output_html
+                
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(html_report_content)
+                print(f"\n📄 Reporte HTML generado en: {output_path}")
+            except Exception as e:
+                logger.error(f"Error al generar el reporte HTML: {e}", exc_info=True)
+                print(f"\n❌ Error al generar el reporte HTML: {e}")

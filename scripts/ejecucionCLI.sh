@@ -37,11 +37,14 @@ while true; do
     QUERY_OUTPUT=$(PYTHONPATH=./src LOG_DIR=${LOG_DIR} python -m src.query_job --job-id ${JOB_ID})
     echo "${QUERY_OUTPUT}"
     
-    # Opcional: Si quieres detener el bucle cuando el trabajo esté completo,
-    # puedes añadir una lógica aquí para parsear el estado y salir.
-    # Por ejemplo, si la salida contiene "status": "completed"
-    if echo "${QUERY_OUTPUT}" | grep -q "Status: COMPLETED"; then
-        echo "Trabajo completado. Saliendo del bucle de consulta."
+    # Detener el bucle cuando el trabajo esté completo
+    if echo "${QUERY_OUTPUT}" | grep -q "Estado Actual: COMPLETED"; then
+        echo "Trabajo completado. Generando reporte HTML..."
+        
+        # Generar el reporte HTML final
+        PYTHONPATH=./src LOG_DIR=${LOG_DIR} python -m src.query_job --job-id ${JOB_ID} --output-html "report-${JOB_ID}.html"
+        
+        echo "Reporte HTML 'report-${JOB_ID}.html' generado."
         break
     fi
 
