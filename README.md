@@ -18,12 +18,14 @@ Este repositorio contiene el proyecto final para la materia Computación II. Es 
 * [3. Componentes Detallados](#3-componentes-detallados)
 * [4. Protocolos de Comunicación](#4-protocolos-de-comunicación)
 * [5. Flujo de Datos Completo](#5-flujo-de-datos-completo)
-* [6. Cumplimiento de Requisitos](#6-cumplimiento-de-requisitos)
-* [7. Stack Tecnológico](#7-stack-tecnológico)
-* [8. Despliegue con Docker](#8-despliegue-con-docker)
-* [9. Estructura del Repositorio](#9-estructura-del-repositorio)
-* [10. Casos de Uso y Escenarios](#10-casos-de-uso-y-escenarios)
-* [11. Consideraciones de Implementación](#11-consideraciones-de-implementación)
+* [6. Stack Tecnológico](#6-stack-tecnológico)
+* [7. Despliegue con Docker](#7-despliegue-con-docker)
+* [8. Estructura del Repositorio](#8-estructura-del-repositorio)
+* [9. Casos de Uso y Escenarios](#9-casos-de-uso-y-escenarios)
+* [10. Consideraciones de Implementación](#10-consideraciones-de-implementación)
+* [11. Métricas de Performance Esperadas](#11-métricas-de-performance-esperadas)
+* [12. Troubleshooting](#12-troubleshooting)
+* [13. Contacto y Contribuciones](#13-contacto-y-contribuciones)
 
 ---
 
@@ -257,41 +259,6 @@ Para la demo del proyecto, el archivo de 200MB se envía codificado en base64 de
    - (Futuro) Re-encolar tareas de workers fallidos
 
 **Estructura del Código:**
-```python
-# Pseudo-código
-async def main():
-    server = await asyncio.start_server(handle_client, '0.0.0.0', 5000)
-    await server.serve_forever()
-
-async def handle_client(reader, writer):
-    data = await reader.read(8192)
-    message = json.loads(data.decode())
-    
-    # Manejar diferentes tipos de mensajes
-    if message['type'] == 'submit_job':
-        job_id = message['job_id']
-        chunks = divide_file(message['file_data'], message['chunk_size'])
-        
-        for i, chunk in enumerate(chunks):
-            task = tasks.find_pattern.delay(
-                chunk, 
-                message['pattern'],
-                {'job_id': job_id, 'chunk_id': i}
-            )
-            redis_client.rpush(f'job:{job_id}:tasks', task.id)
-        
-        response = {'status': 'accepted', 'job_id': job_id}
-        writer.write(json.dumps(response).encode())
-        await writer.drain()
-    
-    elif message['type'] == 'worker_down':
-        # Alerta recibida del Collector
-        await handle_worker_down_alert(message)
-    
-    elif message['type'] == 'query_status':
-        # Consulta de estado del cliente
-        await handle_status_query(message, writer)
-```
 
 **Persistencia en Redis:**
 ```
@@ -312,57 +279,6 @@ job:{job_id}:stats -> {"total_matches": 42, "chunks_processed": 4096, ...}
 - Algoritmo de búsqueda de patrones (ej: KMP, Boyer-Moore, o regex)
 
 **Tarea Principal:**
-```python
-from celery import Celery
-import re
-
-app = Celery('genome_tasks', broker='redis://redis:6379/0')
-
-@app.task(bind=True)
-def find_pattern(self, chunk_data: bytes, pattern: str, metadata: dict):
-    """
-    Busca todas las ocurrencias de 'pattern' en 'chunk_data'.
-    
-    Args:
-        chunk_data: Bytes del chunk a procesar
-        pattern: Patrón de ADN a buscar (ej: "AGGTCCAT")
-        metadata: {'job_id': str, 'chunk_id': int}
-    
-    Returns:
-        {
-            'chunk_id': int,
-            'matches': int,
-            'positions': [list of positions],  # Opcional
-            'processing_time': float
-        }
-    """
-    import time
-    start = time.time()
-    
-    # Decodificar chunk
-    text = chunk_data.decode('utf-8')
-    
-    # Buscar patrón (usando regex simple, puede optimizarse)
-    matches = list(re.finditer(pattern, text))
-    
-    result = {
-        'chunk_id': metadata['chunk_id'],
-        'matches': len(matches),
-        'positions': [m.start() for m in matches],
-        'processing_time': time.time() - start
-    }
-    
-    # Guardar resultado parcial en Redis
-    redis_client.rpush(
-        f"job:{metadata['job_id']}:results",
-        json.dumps(result)
-    )
-    
-    # Enviar heartbeat al Agente local via IPC
-    send_heartbeat_to_agent()
-    
-    return result
-```
 
 **Configuración:**
 - Concurrencia: 2-4 procesos por worker (depende de CPUs)
@@ -406,125 +322,8 @@ celery -A genome_worker worker \
    - Si detecta estado DEAD, enviar alerta inmediata
 
 **Estructura del Código:**
-```python
-import asyncio
-import socket
-import psutil
-import json
-import time
-
-class MonitorAgent:
-    def __init__(self, worker_id, collector_host, collector_port):
-        self.worker_id = worker_id
-        self.collector_host = collector_host
-        self.collector_port = collector_port
-        self.last_heartbeat = time.time()
-        self.status = "ALIVE"
-        
-        # IPC Socket (Unix Domain Socket)
-        self.ipc_socket_path = f"/tmp/worker_{worker_id}.sock"
-        
-    async def listen_ipc_heartbeat(self):
-        """Escucha heartbeats del worker via Unix socket."""
-        # Crear server Unix socket
-        server = await asyncio.start_unix_server(
-            self.handle_worker_heartbeat,
-            path=self.ipc_socket_path
-        )
-        async with server:
-            await server.serve_forever()
-    
-    async def handle_worker_heartbeat(self, reader, writer):
-        """Recibe heartbeat del worker."""
-        data = await reader.read(100)
-        message = json.loads(data.decode())
-        
-        if message['type'] == 'heartbeat':
-            self.last_heartbeat = time.time()
-            self.status = "ALIVE"
-    
-    async def collect_metrics(self):
-        """Recolecta métricas del sistema."""
-        while True:
-            # Verificar si worker sigue vivo
-            if time.time() - self.last_heartbeat > 15:
-                self.status = "DEAD"
-            
-            metrics = {
-                'worker_id': self.worker_id,
-                'timestamp': time.time(),
-                'status': self.status,
-                'cpu_percent': psutil.cpu_percent(interval=1),
-                'memory_mb': psutil.virtual_memory().used / (1024**2),
-                'memory_percent': psutil.virtual_memory().percent
-            }
-            
-            await self.send_to_collector(metrics)
-            await asyncio.sleep(10)  # Reportar cada 10 seg
-    
-    async def send_to_collector(self, metrics):
-        """Envía métricas al Collector via TCP."""
-        try:
-            reader, writer = await asyncio.open_connection(
-                self.collector_host,
-                self.collector_port
-            )
-            
-            message = {
-                'type': 'metrics',
-                'data': metrics
-            }
-            
-            writer.write(json.dumps(message).encode())
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-        except Exception as e:
-            print(f"Error enviando al collector: {e}")
-    
-    async def run(self):
-        """Inicia el agente."""
-        await asyncio.gather(
-            self.listen_ipc_heartbeat(),
-            self.collect_metrics()
-        )
-
-# Inicio
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--worker-id', required=True)
-    parser.add_argument('--collector-host', default='collector')
-    parser.add_argument('--collector-port', type=int, default=6000)
-    args = parser.parse_args()
-    
-    agent = MonitorAgent(args.worker_id, args.collector_host, args.collector_port)
-    asyncio.run(agent.run())
-```
 
 **IPC: Heartbeat desde Worker:**
-```python
-# En genome_worker.py
-def send_heartbeat_to_agent():
-    """Envía heartbeat al agente local via Unix socket."""
-    import socket
-    import json
-    import os
-    
-    worker_id = os.environ.get('WORKER_ID', 'worker1')
-    sock_path = f"/tmp/worker_{worker_id}.sock"
-    
-    try:
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.connect(sock_path)
-        
-        message = {'type': 'heartbeat', 'timestamp': time.time()}
-        client.send(json.dumps(message).encode())
-        client.close()
-    except Exception as e:
-        # Si el agente no está disponible, el worker continúa procesando
-        print(f"Warning: Error enviando heartbeat: {e}")
-```
 
 **Nota importante:** El Worker de Celery con `--concurrency=4` lanza 4 procesos hijos. Cada uno puede enviar heartbeats al mismo Unix socket. El Agente, usando `asyncio.start_unix_server()`, acepta múltiples conexiones concurrentes sin problema.
 
@@ -548,186 +347,18 @@ def send_heartbeat_to_agent():
    - Parsear JSON de métricas
 
 2. **Detección de Anomalías:**
-   - CPU > 95% por más de 5 minutos → Alerta
-   - Status = "DEAD" → Alerta crítica
-   - Memory > 90% → Alerta
-   - No recibe métricas de un agente por 30 seg → Alerta
+   - Status = "DEAD" (reportado por el agente) → Alerta crítica
+   - No recibe métricas de un agente por 30 seg (timeout) → Alerta crítica
 
 3. **Generación de Alertas:**
-   - Encolar tarea en Celery: `tasks.send_alert.delay(alert_data)`
-   - Loggear en archivo: `/var/log/alerts.log`
-   - Notificar al Master via TCP
+   - Loggear la alerta (actualmente imprime en consola)
+   - Notificar al Master vía TCP
 
 4. **Persistencia en Redis:**
    - Guardar último estado de cada worker
    - Guardar historial de alertas
 
 **Estructura del Código:**
-```python
-import asyncio
-import json
-import redis
-from collections import defaultdict
-import time
-
-class CollectorServer:
-    def __init__(self, port=6000, master_host='master', master_port=5000):
-        self.port = port
-        self.master_host = master_host
-        self.master_port = master_port
-        self.redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
-        self.worker_states = defaultdict(dict)  # {worker_id: {last_update, metrics}}
-        
-    async def handle_agent(self, reader, writer):
-        """Recibe métricas de un agente."""
-        try:
-            data = await reader.read(4096)
-            message = json.loads(data.decode())
-            
-            if message['type'] == 'metrics':
-                await self.process_metrics(message['data'])
-            
-        except Exception as e:
-            print(f"Error procesando mensaje: {e}")
-        finally:
-            writer.close()
-            await writer.wait_closed()
-    
-    async def process_metrics(self, metrics):
-        """Procesa métricas recibidas y detecta anomalías."""
-        worker_id = metrics['worker_id']
-        
-        # Actualizar estado en memoria
-        self.worker_states[worker_id] = {
-            'last_update': time.time(),
-            'metrics': metrics
-        }
-        
-        # Guardar en Redis
-        self.redis_client.setex(
-            f'worker:{worker_id}:metrics',
-            60,  # TTL 60 segundos
-            json.dumps(metrics)
-        )
-        
-        # Detectar anomalías
-        await self.check_anomalies(worker_id, metrics)
-    
-    async def check_anomalies(self, worker_id, metrics):
-        """Detecta si hay anomalías en las métricas."""
-        alerts = []
-        
-        # Worker muerto
-        if metrics['status'] == 'DEAD':
-            alerts.append({
-                'severity': 'CRITICAL',
-                'worker_id': worker_id,
-                'message': f'Worker {worker_id} ha dejado de responder (DEAD)',
-                'timestamp': time.time()
-            })
-        
-        # CPU alta
-        if metrics['cpu_percent'] > 95:
-            # Verificar si lleva más de 5 min así
-            cpu_high_key = f'worker:{worker_id}:cpu_high_since'
-            since = self.redis_client.get(cpu_high_key)
-            
-            if since is None:
-                self.redis_client.set(cpu_high_key, time.time())
-            elif time.time() - float(since) > 300:  # 5 minutos
-                alerts.append({
-                    'severity': 'WARNING',
-                    'worker_id': worker_id,
-                    'message': f'Worker {worker_id} con CPU >95% por más de 5 minutos',
-                    'timestamp': time.time()
-                })
-        else:
-            self.redis_client.delete(f'worker:{worker_id}:cpu_high_since')
-        
-        # Memoria alta
-        if metrics['memory_percent'] > 90:
-            alerts.append({
-                'severity': 'WARNING',
-                'worker_id': worker_id,
-                'message': f'Worker {worker_id} con Memoria >90%',
-                'timestamp': time.time()
-            })
-        
-        # Enviar alertas
-        for alert in alerts:
-            await self.send_alert(alert)
-            await self.notify_master(alert)
-    
-    async def send_alert(self, alert):
-        """Encola alerta en Celery y loggea."""
-        # Loggear
-        with open('/var/log/alerts.log', 'a') as f:
-            f.write(json.dumps(alert) + '\n')
-        
-        # Encolar en Celery (tarea asíncrona para enviar email, etc.)
-        # tasks.send_alert.delay(alert)
-        print(f"[ALERT] {alert}")
-    
-    async def notify_master(self, alert):
-        """Notifica al Master sobre worker caído."""
-        if alert['severity'] == 'CRITICAL':
-            try:
-                reader, writer = await asyncio.open_connection(
-                    self.master_host,
-                    self.master_port
-                )
-                
-                message = {
-                    'type': 'worker_down',
-                    'worker_id': alert['worker_id'],
-                    'timestamp': alert['timestamp']
-                }
-                
-                writer.write(json.dumps(message).encode())
-                await writer.drain()
-                writer.close()
-                await writer.wait_closed()
-            except Exception as e:
-                print(f"Error notificando al Master: {e}")
-    
-    async def monitor_timeouts(self):
-        """Detecta workers que dejaron de reportar."""
-        while True:
-            current_time = time.time()
-            
-            for worker_id, state in list(self.worker_states.items()):
-                if current_time - state['last_update'] > 30:
-                    alert = {
-                        'severity': 'CRITICAL',
-                        'worker_id': worker_id,
-                        'message': f'Worker {worker_id} no reporta hace más de 30 seg',
-                        'timestamp': current_time
-                    }
-                    await self.send_alert(alert)
-                    await self.notify_master(alert)
-            
-            await asyncio.sleep(10)
-    
-    async def run(self):
-        """Inicia el servidor collector."""
-        server = await asyncio.start_server(
-            self.handle_agent,
-            '0.0.0.0',
-            self.port
-        )
-        
-        print(f"Collector escuchando en puerto {self.port}")
-        
-        async with server:
-            await asyncio.gather(
-                server.serve_forever(),
-                self.monitor_timeouts()
-            )
-
-if __name__ == "__main__":
-    collector = CollectorServer()
-    asyncio.run(collector.run())
-```
 
 ---
 
@@ -751,7 +382,7 @@ Todos los mensajes entre componentes usan JSON con la siguiente estructura base:
 ```json
 {
   "type": "submit_job",
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "job_id": "uuid-generado-por-cliente",
   "filename": "genome.txt",
   "pattern": "AGGTCCAT",
   "chunk_size": 51200,
@@ -772,7 +403,7 @@ Todos los mensajes entre componentes usan JSON con la siguiente estructura base:
 ```json
 {
   "status": "processing",
-  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "job_id": "uuid-generado-por-cliente",
   "progress": {
     "total_chunks": 4096,
     "processed_chunks": 2048,
@@ -846,7 +477,7 @@ Todos los mensajes entre componentes usan JSON con la siguiente estructura base:
 
 ### 5.2 Escenario de Fallo (Worker Caído)
 
-1. **T=0-100s:** Sistema procesando normalmente
+1. **T=0-100s:** Sistema procesando normally
 2. **T=100s:** Worker_2 sufre segfault y muere procesando chunk #1537
 3. **T=105s:** Agente_2 intenta leer heartbeat via IPC, no recibe respuesta
 4. **T=115s:** Agente_2 marca status = DEAD (15s sin heartbeat)
@@ -858,7 +489,7 @@ Todos los mensajes entre componentes usan JSON con la siguiente estructura base:
 10. **T=125s:** Workers 1 y 3 (aún vivos) toman las tareas re-encoladas
 11. **T=200s:** Sistema completa procesamiento con 2 workers
 
-**Nota sobre re-encolado:** Celery maneja automáticamente el re-encolado de tareas cuando un worker muere antes de completarlas (configurado con `ack_late=True` y `reject_on_worker_lost=True`). El Master solo necesita registrar el evento para auditoría.
+**Nota sobre re-encolado:** Celery maneja automáticamente el re-encolado de tareas cuando un worker cae antes de completarlas (configurado con `ack_late=True` y `reject_on_worker_lost=True`). El Master solo necesita registrar el evento para auditoría.
 
 ### 5.3 Diagrama de Secuencia (Submit Job)
 
@@ -906,7 +537,7 @@ Cliente          Master          Redis           Worker          Agente         
 
 ---
 
-## 7. Stack Tecnológico
+## 6. Stack Tecnológico
 
 ### 7.1 Tecnologías Core
 
@@ -954,7 +585,7 @@ IPC
 
 ---
 
-## 8. Despliegue con Docker
+## 7. Despliegue con Docker
 
 ### 8.1 Arquitectura de Contenedores
 
@@ -985,194 +616,13 @@ IPC
 
 ### 8.2 docker-compose.yml
 
-```yaml
-version: '3.8'
-
-services:
-  redis:
-    image: redis:7-alpine
-    container_name: genome-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - genome-network
-    command: redis-server --appendonly yes
-
-  master:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.master
-    container_name: genome-master
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./src:/app/src
-      - ./logs:/app/logs
-    environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MASTER_PORT=5000
-    depends_on:
-      - redis
-    networks:
-      - genome-network
-    command: python src/master_server.py --port 5000
-
-  collector:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.collector
-    container_name: genome-collector
-    ports:
-      - "6000:6000"
-    volumes:
-      - ./src:/app/src
-      - ./logs:/app/logs
-    environment:
-      - REDIS_HOST=redis
-      - MASTER_HOST=master
-      - MASTER_PORT=5000
-      - COLLECTOR_PORT=6000
-    depends_on:
-      - redis
-      - master
-    networks:
-      - genome-network
-    command: python src/collector_server.py --port 6000
-
-  worker1:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.worker
-    container_name: genome-worker1
-    volumes:
-      - ./src:/app/src
-      - /tmp/worker1:/tmp  # Para Unix sockets IPC
-    environment:
-      - WORKER_ID=worker1
-      - REDIS_HOST=redis
-      - COLLECTOR_HOST=collector
-      - COLLECTOR_PORT=6000
-    depends_on:
-      - redis
-      - collector
-    networks:
-      - genome-network
-    command: >
-      sh -c "
-        python src/monitor_agent.py --worker-id worker1 --collector-host collector &
-        sleep 3
-        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker1@%h
-      "
-
-  worker2:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.worker
-    container_name: genome-worker2
-    volumes:
-      - ./src:/app/src
-      - /tmp/worker2:/tmp
-    environment:
-      - WORKER_ID=worker2
-      - REDIS_HOST=redis
-      - COLLECTOR_HOST=collector
-      - COLLECTOR_PORT=6000
-    depends_on:
-      - redis
-      - collector
-    networks:
-      - genome-network
-    command: >
-      sh -c "
-        python src/monitor_agent.py --worker-id worker2 --collector-host collector &
-        sleep 3
-        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker2@%h
-      "
-
-  worker3:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.worker
-    container_name: genome-worker3
-    volumes:
-      - ./src:/app/src
-      - /tmp/worker3:/tmp
-    environment:
-      - WORKER_ID=worker3
-      - REDIS_HOST=redis
-      - COLLECTOR_HOST=collector
-      - COLLECTOR_PORT=6000
-    depends_on:
-      - redis
-      - collector
-    networks:
-      - genome-network
-    command: >
-      sh -c "
-        python src/monitor_agent.py --worker-id worker3 --collector-host collector &
-        sleep 3
-        celery -A src.genome_worker worker --loglevel=info --concurrency=4 --hostname=worker3@%h
-      "
-
-networks:
-  genome-network:
-    driver: bridge
-
-volumes:
-  redis-data:
-```
-
 ### 8.3 Dockerfiles
 
 **docker/Dockerfile.master:**
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY src/ ./src/
-
-EXPOSE 5000
-
-CMD ["python", "src/master_server.py", "--port", "5000"]
-```
 
 **docker/Dockerfile.collector:**
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY src/ ./src/
-
-EXPOSE 6000
-
-CMD ["python", "src/collector_server.py", "--port", "6000"]
-```
 
 **docker/Dockerfile.worker:**
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Instalar psutil y otras deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY src/ ./src/
-
-# El comando se especifica en docker-compose.yml para iniciar Agente + Worker
-```
 
 ### 8.4 Comandos de Despliegue
 
@@ -1202,7 +652,7 @@ docker-compose down -v
 
 ---
 
-## 9. Estructura del Repositorio
+## 8. Estructura del Repositorio
 
 ```
 final/
@@ -1237,10 +687,7 @@ final/
 │   │   ├── protocol.py      # Definición de mensajes JSON
 │   │   └── logger.py        # Configuración de logging
 │   │
-│   └── tasks/
-│       ├── __init__.py
-│       ├── compute.py       # Tareas de cómputo (find_pattern)
-│       └── alerts.py        # Tareas de alertas (send_alert)
+
 │
 ├── tests/                   # Tests unitarios e integración
 │   ├── test_master.py
@@ -1269,7 +716,7 @@ final/
 
 ---
 
-## 10. Casos de Uso y Escenarios
+## 9. Casos de Uso y Escenarios
 
 ### 10.1 Caso de Uso 1: Análisis Genómico Simple
 
@@ -1332,7 +779,7 @@ python src/query_job.py \
 
 **Pasos:**
 ```bash
-# 1. Sistema funcionando normalmente
+# 1. Sistema funcionando normally
 docker-compose up -d
 
 # 2. Enviar trabajo grande
@@ -1393,59 +840,19 @@ docker exec -it genome-redis redis-cli
 127.0.0.1:6379> LLEN job:550e8400-e29b-41d4-a716-446655440000:tasks
 (integer) 4096
 
-127.0.0.1:6379> LLEN job:550e8400-e29b-41d4-a716-446655440000:results
+127.0.0.1:4096> LLEN job:550e8400-e29b-41d4-a716-446655440000:results
 (integer) 2048
 ```
 
 ---
 
-## 11. Consideraciones de Implementación
+## 10. Consideraciones de Implementación
 
 ### 11.1 Gestión de Chunks con Overlap
 
 **Problema:** Si un patrón de ADN cae justo en la frontera entre dos chunks, puede no detectarse.
 
 **Solución:** Agregar overlap entre chunks.
-
-```python
-# En utils/chunker.py
-def divide_file_with_overlap(file_path: str, chunk_size: int, overlap: int = 100):
-    """
-    Divide archivo en chunks con overlap.
-    
-    Args:
-        file_path: Path al archivo
-        chunk_size: Tamaño de cada chunk en bytes (ej: 51200 = 50KB)
-        overlap: Bytes de overlap entre chunks (ej: 100)
-    
-    Yields:
-        (chunk_id, data, metadata)
-    """
-    with open(file_path, 'rb') as f:
-        chunk_id = 0
-        offset = 0
-        
-        while True:
-            # Leer chunk_size bytes
-            f.seek(offset)
-            data = f.read(chunk_size + overlap)
-            
-            if not data:
-                break
-            
-            metadata = {
-                'chunk_id': chunk_id,
-                'offset': offset,
-                'size': len(data),
-                'has_overlap': chunk_id > 0
-            }
-            
-            yield chunk_id, data, metadata
-            
-            # Avanzar (chunk_size, no chunk_size + overlap)
-            offset += chunk_size
-            chunk_id += 1
-```
 
 **Post-procesamiento:** Al agregar resultados, eliminar duplicados en zonas de overlap usando las posiciones absolutas.
 
@@ -1478,35 +885,6 @@ AGGTCCATAGCTAGCTAGCTACGATCGATCGTAGCTAGCTAGCTACGATCGATCGATCG
 python scripts/generate_genome.py --size 200 --output data/genome_sample.txt
 ```
 
-```python
-# scripts/generate_genome.py
-import random
-import argparse
-
-def generate_genome(size_mb: int, output_file: str):
-    """Genera archivo de genoma sintético."""
-    nucleotides = ['A', 'C', 'G', 'T']
-    size_bytes = size_mb * 1024 * 1024
-    
-    with open(output_file, 'w') as f:
-        # Escribir en líneas de 60 caracteres (formato FASTA)
-        chars_written = 0
-        while chars_written < size_bytes:
-            line = ''.join(random.choices(nucleotides, k=60))
-            f.write(line + '\n')
-            chars_written += 61  # 60 chars + newline
-    
-    print(f"Archivo generado: {output_file} ({size_mb}MB)")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--size', type=int, required=True, help='Tamaño en MB')
-    parser.add_argument('--output', required=True, help='Archivo de salida')
-    args = parser.parse_args()
-    
-    generate_genome(args.size, args.output)
-```
-
 ### 11.4 Algoritmo de Búsqueda de Patrones
 
 **Opciones:**
@@ -1516,20 +894,6 @@ if __name__ == "__main__":
 3. **Boyer-Moore:** O(n/m) caso promedio - El más rápido para patrones largos
 
 **Decisión:** Usar **regex** por simplicidad. Si se necesita optimizar, implementar KMP.
-
-```python
-# En genome_worker.py
-import re
-
-def find_pattern_regex(text: str, pattern: str) -> list:
-    """Busca pattern en text usando regex."""
-    return [m.start() for m in re.finditer(pattern, text)]
-
-def find_pattern_kmp(text: str, pattern: str) -> list:
-    """Busca pattern usando algoritmo KMP (opcional, para optimización)."""
-    # Implementación KMP aquí si se necesita
-    pass
-```
 
 ### 11.5 Estrategia de Re-encolado
 
@@ -1547,31 +911,8 @@ Celery proporciona mecanismos automáticos de re-encolado cuando se configura co
    - Opcionalmente, marcar en Redis: `worker:{id}:status = DEAD`
 
 **Implementación:**
-```python
-# En genome_worker.py
-@app.task(bind=True, ack_late=True, reject_on_worker_lost=True)
-def find_pattern(self, chunk_data, pattern, metadata):
-    # Si worker muere aquí, Celery re-encola automáticamente
-    # No necesitamos lógica manual de re-encolado
-    ...
-```
 
 **En el Master:**
-```python
-async def handle_worker_down_alert(message):
-    """Maneja alerta de worker caído del Collector."""
-    worker_id = message['worker_id']
-    
-    # Loggear evento
-    logger.warning(f"Worker {worker_id} reportado como caído")
-    
-    # Marcar en Redis
-    redis_client.set(f'worker:{worker_id}:status', 'DEAD')
-    redis_client.set(f'worker:{worker_id}:down_at', time.time())
-    
-    # Celery ya re-encoló las tareas pendientes automáticamente
-    # No necesitamos intervención manual
-```
 
 **Nota para implementación:** El sistema de re-encolado automático de Celery es robusto y bien probado. Para este proyecto académico, aprovechar estas features es más profesional que implementar lógica custom que puede tener bugs.
 
@@ -1579,45 +920,7 @@ async def handle_worker_down_alert(message):
 
 **Estándar:** Todos los logs en formato JSON para fácil parsing.
 
-```python
-# En utils/logger.py
-import logging
-import json
-from datetime import datetime
-
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        log_obj = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'level': record.levelname,
-            'component': record.name,
-            'message': record.getMessage(),
-            'module': record.module,
-            'function': record.funcName
-        }
-        if record.exc_info:
-            log_obj['exception'] = self.formatException(record.exc_info)
-        return json.dumps(log_obj)
-
-def setup_logger(name: str, log_file: str):
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    
-    handler = logging.FileHandler(log_file)
-    handler.setFormatter(JSONFormatter())
-    
-    logger.addHandler(handler)
-    return logger
-```
-
 **Uso:**
-```python
-# En master_server.py
-from utils.logger import setup_logger
-
-logger = setup_logger('master', '/app/logs/master.log')
-logger.info('Master server started', extra={'port': 5000})
-```
 
 ### 11.7 Seguridad y Validación
 
@@ -1628,179 +931,16 @@ logger.info('Master server started', extra={'port': 5000})
 3. **Rate limiting:** Max 10 jobs por cliente por minuto
 4. **Sanitización:** Validar todos los inputs JSON
 
-```python
-# En master_server.py
-def validate_job(message: dict) -> tuple[bool, str]:
-    """Valida un job recibido."""
-    # Validar campos requeridos
-    required = ['job_id', 'filename', 'pattern', 'file_size']
-    for field in required:
-        if field not in message:
-            return False, f"Missing field: {field}"
-    
-    # Validar tamaño
-    if message['file_size'] > 500 * 1024 * 1024:  # 500MB
-        return False, "File too large (max 500MB)"
-    
-    # Validar patrón
-    if not re.match(r'^[ACGT]+, message['pattern']):
-        return False, "Pattern must contain only A, C, G, T"
-    
-    return True, "OK"
-```
-
 ---
 
-## 12. Guía para Herramientas IA/LLM
-
-### 12.1 Contexto para Generación de Código
-
-Si eres una herramienta de IA generando código para este proyecto, ten en cuenta:
-
-1. **Python 3.11+:** Usa type hints, async/await moderno
-2. **No usar frameworks web:** FastAPI/Flask/Django están prohibidos. Usa `asyncio.start_server()` directamente
-3. **Unix Domain Sockets para IPC:** Usa `socket.AF_UNIX`, no `multiprocessing.Queue` (Docker no lo soporta bien)
-4. **JSON everywhere:** Todos los mensajes entre componentes en JSON
-5. **Error handling:** Siempre usa try-except en operaciones de red/IPC
-6. **Logging:** Usa el logger JSON definido en `utils/logger.py`
-7. **Celery config:** Broker y backend en Redis, no RabbitMQ
-
-### 12.2 Orden de Implementación Sugerido
-
-Para herramientas de desarrollo iterativo (Cursor, Aider, etc.):
-
-**Fase 1: Infraestructura básica (Día 1-2)**
-1. Setup de Docker Compose con Redis
-2. Implementar `utils/logger.py` y `utils/protocol.py`
-3. Script de generación de genoma (`scripts/generate_genome.py`)
-
-**Fase 2: Sistema A - Grid de Cómputo (Día 3-7)**
-1. Implementar `genome_worker.py` (tarea básica de búsqueda)
-2. Implementar `utils/chunker.py` (división con overlap)
-3. Implementar `master_server.py` (servidor asyncio + división + encolado)
-4. Implementar `submit_job.py` (cliente CLI)
-5. Implementar `query_job.py` (consulta de estado)
-6. Testing end-to-end del Sistema A
-
-**Fase 3: Sistema B - Monitoreo (Día 8-12)**
-1. Implementar `monitor_agent.py` (IPC + métricas)
-2. Modificar `genome_worker.py` para enviar heartbeats
-3. Implementar `collector_server.py` (recepción + detección)
-4. Implementar comunicación Collector → Master
-5. Testing de detección de fallos
-
-**Fase 4: Integración y Polish (Día 13-15)**
-1. Integrar todo en Docker Compose
-2. Testing de escenarios completos
-3. Documentación final
-4. Optimizaciones de performance
-
-**Fase 5: Features Extra (Día 16-18)**
-1. Re-encolado automático mejorado
-2. Dashboard simple (opcional)
-3. Métricas adicionales
-
-### 12.3 Comandos de Testing Rápido
-
-```bash
-# Test individual de componentes
-python -m pytest tests/test_master.py -v
-python -m pytest tests/test_worker.py -v
-python -m pytest tests/test_agent.py -v
-
-# Test de integración completo
-python -m pytest tests/test_integration.py -v
-
-# Test manual con archivo pequeño (10MB)
-python scripts/generate_genome.py --size 10 --output data/test_small.txt
-python src/submit_job.py --file data/test_small.txt --pattern "AGGTCCAT"
-
-# Monitorear logs en tiempo real de todos los componentes
-docker-compose logs -f --tail=100
-```
-
-### 12.4 Variables de Entorno Importantes
-
-```bash
-# Master
-REDIS_HOST=redis
-REDIS_PORT=6379
-MASTER_PORT=5000
-LOG_LEVEL=INFO
-
-# Collector
-COLLECTOR_PORT=6000
-MASTER_HOST=master
-MASTER_PORT=5000
-ALERT_THRESHOLD_CPU=95
-ALERT_THRESHOLD_MEMORY=90
-
-# Worker
-WORKER_ID=worker1  # worker2, worker3, etc.
-CELERY_BROKER=redis://redis:6379/0
-CELERY_BACKEND=redis://redis:6379/1
-COLLECTOR_HOST=collector
-COLLECTOR_PORT=6000
-
-# Agente
-AGENT_REPORT_INTERVAL=10  # segundos
-HEARTBEAT_TIMEOUT=15  # segundos
-IPC_SOCKET_PATH=/tmp/worker_{id}.sock
-```
-
-### 12.5 Debugging Tips
-
-**Si el Master no recibe trabajos:**
-```bash
-# Verificar que está escuchando
-docker exec genome-master netstat -tlnp | grep 5000
-
-# Probar conexión desde host
-telnet localhost 5000
-
-# Ver logs detallados
-docker-compose logs master --tail=50
-```
-
-**Si los Workers no procesan tareas:**
-```bash
-# Verificar conexión a Redis
-docker exec genome-worker1 redis-cli -h redis ping
-
-# Ver cola de Celery
-docker exec genome-redis redis-cli LLEN celery
-
-# Ver workers activos en Celery
-docker exec genome-worker1 celery -A src.genome_worker inspect active
-```
-
-**Si el Agente no reporta al Collector:**
-```bash
-# Verificar que el Agente está corriendo
-docker exec genome-worker1 ps aux | grep monitor_agent
-
-# Verificar Unix socket
-docker exec genome-worker1 ls -la /tmp/*.sock
-
-# Test manual de conexión al Collector
-docker exec genome-worker1 python -c "
-import socket
-s = socket.socket()
-s.connect(('collector', 6000))
-print('Conectado!')
-"
-```
-
----
-
-## 13. Métricas de Performance Esperadas
+## 11. Métricas de Performance Esperadas
 
 ### 13.1 Benchmarks Objetivo
 
 Con la configuración de 3 workers (4 cores cada uno):
 
 | Métrica | Valor Esperado |
-|---------|---------------|
+|------------|---------------|
 | **Tiempo de procesamiento (200MB)** | 90-150 segundos |
 | **Throughput** | ~1.5-2 MB/s |
 | **Chunks por segundo** | ~30-40 |
@@ -1818,114 +958,9 @@ Con la configuración de 3 workers (4 cores cada uno):
 
 ### 13.3 Cómo Medir Performance
 
-```python
-# scripts/benchmark.py
-import time
-import subprocess
-import json
-
-def run_benchmark(file_size_mb, pattern, num_workers):
-    """Ejecuta benchmark y retorna métricas."""
-    
-    # Generar archivo
-    subprocess.run([
-        'python', 'scripts/generate_genome.py',
-        '--size', str(file_size_mb),
-        '--output', 'data/benchmark.txt'
-    ])
-    
-    # Enviar job y medir tiempo
-    start = time.time()
-    
-    result = subprocess.run([
-        'python', 'src/submit_job.py',
-        '--file', 'data/benchmark.txt',
-        '--pattern', pattern
-    ], capture_output=True, text=True)
-    
-    job_id = json.loads(result.stdout)['job_id']
-    
-    # Esperar a que termine
-    while True:
-        result = subprocess.run([
-            'python', 'src/query_job.py',
-            '--job-id', job_id
-        ], capture_output=True, text=True)
-        
-        status = json.loads(result.stdout)
-        if status['status'] == 'COMPLETED':
-            break
-        
-        time.sleep(5)
-    
-    end = time.time()
-    
-    return {
-        'file_size_mb': file_size_mb,
-        'processing_time': end - start,
-        'throughput_mbps': file_size_mb / (end - start),
-        'workers': num_workers
-    }
-```
-
 ---
 
-## 14. Extensiones Futuras (TODO.md)
-
-### 14.1 Features Nice-to-Have
-
-1. **Dashboard Web (opcional):**
-   - Visualización en tiempo real de workers y métricas
-   - Gráficos de CPU/RAM con Chart.js
-   - Ver jobs en progreso
-   - **Tech:** Flask simple + WebSockets (pero solo para dashboard, no para core)
-
-2. **Re-encolado Inteligente:**
-   - Cuando un worker cae, detectar qué chunks estaba procesando
-   - Re-asignar a workers con menos carga
-   - Priorizar chunks cercanos a completar el job
-
-3. **Compresión de Chunks:**
-   - Comprimir chunks antes de enviar a Redis
-   - Reducir uso de memoria de Redis
-   - Usar `gzip` o `lz4`
-
-4. **Persistencia de Jobs:**
-   - Guardar estado de jobs en disco (SQLite o archivos JSON)
-   - Permitir reanudar jobs si el Master se reinicia
-
-5. **Autoscaling de Workers:**
-   - Detectar cuando hay muchos jobs encolados
-   - Lanzar más contenedores de workers automáticamente
-   - Usar Docker API o Kubernetes
-
-6. **Múltiples Patrones:**
-   - Buscar varios patrones en una sola pasada
-   - Optimización: compilar todos los patrones en un solo regex
-
-7. **Soporte para FASTA:**
-   - Parsear formato FASTA real (con headers)
-   - Ignorar líneas de comentarios
-   - Procesar múltiples secuencias en un archivo
-
-### 14.2 Optimizaciones de Performance
-
-1. **Usar Boyer-Moore en lugar de regex**
-2. **Pipeline de chunks:** Mientras se procesan chunks, ir enviando los siguientes
-3. **Caché de resultados:** Si se busca el mismo patrón dos veces, retornar del cache
-4. **Paralelización intra-chunk:** Dividir chunks grandes en sub-chunks
-
-### 14.3 Mejoras de Monitoreo
-
-1. **Métricas de red:** Latencia, throughput, paquetes perdidos
-2. **Métricas de disco:** I/O, espacio disponible
-3. **Historial de métricas:** Guardar en TimeSeries DB (InfluxDB, Prometheus)
-4. **Alertas avanzadas:** Machine learning para detectar anomalías
-5. **Notificaciones:** Email, Slack, Telegram cuando hay alertas
-
----
-
-## 15. Troubleshooting
+## 12. Troubleshooting
 
 ### 15.1 Problemas Comunes
 
@@ -1957,7 +992,7 @@ Error: [Errno 2] No such file or directory: '/tmp/worker_1.sock'
 # En docker-compose.yml, el Agente debe iniciar primero:
 command: >
   sh -c "
-    python src/monitor_agent.py ... &
+    python src/monitor_agent.py ... & 
     sleep 2  # Esperar a que Agente cree el socket
     celery -A src.genome_worker worker ...
   "
@@ -1970,18 +1005,6 @@ command: >
 Error: Received unregistered task of type 'tasks.find_pattern'
 ```
 **Solución:**
-```python
-# Verificar imports en genome_worker.py
-from celery import Celery
-
-# Asegurarse de que el app de Celery tiene el nombre correcto
-app = Celery('genome_tasks', broker='redis://redis:6379/0')
-
-# Y que la tarea está decorada correctamente
-@app.task(bind=True)
-def find_pattern(self, chunk_data, pattern, metadata):
-    ...
-```
 
 ---
 
@@ -1990,17 +1013,6 @@ def find_pattern(self, chunk_data, pattern, metadata):
 Error: MemoryError: Unable to allocate array
 ```
 **Solución:**
-```python
-# No cargar todo el archivo en memoria
-# Usar streaming en chunker.py:
-def divide_file_streaming(file_path, chunk_size):
-    with open(file_path, 'rb') as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            yield chunk
-```
 
 ---
 
@@ -2009,15 +1021,6 @@ def divide_file_streaming(file_path, chunk_size):
 Warning: Received metrics from worker_1 twice in 1 second
 ```
 **Solución:**
-```python
-# En monitor_agent.py, usar un lock para evitar envíos concurrentes:
-self.send_lock = asyncio.Lock()
-
-async def send_to_collector(self, metrics):
-    async with self.send_lock:
-        # Enviar métricas
-        ...
-```
 
 ### 15.2 Logs de Debugging
 
@@ -2043,44 +1046,7 @@ docker-compose logs collector | jq 'select(.message | contains("ALERT"))' | jq -
 
 ---
 
-## 16. Criterios de Evaluación (Para Profesores)
-
-### 16.1 Rubrica Esperada
-
-| Categoría | Peso | Criterios |
-|-----------|------|-----------|
-| **Funcionalidad** | 40% | Sistema completa el análisis genómico correctamente. Workers procesan en paralelo. Resultados son correctos. |
-| **Arquitectura** | 25% | Uso correcto de sockets, asyncio, Celery, IPC. Separación clara de responsabilidades. Diseño modular. |
-| **Monitoreo** | 15% | Detección de fallos funciona. Métricas se reportan correctamente. Alertas se generan apropiadamente. |
-| **Documentación** | 10% | README completo. Código comentado. Justificación de decisiones técnicas. |
-| **Docker** | 5% | Sistema se levanta con `docker-compose up`. Configuración correcta de contenedores. |
-| **Extras** | 5% | Re-encolado, base de datos, dashboard, optimizaciones. |
-
-### 16.2 Demostración Sugerida para el Final
-
-**Guión de Demo (15 minutos):**
-
-1. **Intro (2 min):** Explicar arquitectura con diagrama
-2. **Caso Normal (5 min):** 
-   - Levantar sistema
-   - Enviar job de 200MB
-   - Mostrar workers procesando
-   - Mostrar métricas en Redis
-   - Mostrar resultado final
-3. **Caso de Fallo (5 min):**
-   - Durante procesamiento, matar un worker
-   - Mostrar detección en Collector
-   - Mostrar alerta en logs
-   - Mostrar que el job se completa igual
-4. **Arquitectura Técnica (3 min):**
-   - Explicar uso de sockets (mostrar código)
-   - Explicar asyncio (mostrar código)
-   - Explicar IPC (mostrar Unix socket)
-   - Explicar Celery (mostrar cola de Redis)
-
----
-
-## 17. Contacto y Contribuciones
+## 13. Contacto y Contribuciones
 
 **Autor:** [Tu Nombre]  
 **Materia:** Computación II - [Universidad]  
@@ -2135,7 +1101,7 @@ INFO
 
 # Ver estadísticas de Celery
 LLEN celery  # Tareas pendientes
-KEYS celery-task-meta-*  # Resultados de tareas
+KEYS celery-task-meta-*
 
 # Limpiar todo (cuidado!)
 FLUSHALL
@@ -2173,3 +1139,4 @@ celery -A src.genome_worker inspect ping
 - **Master:** Servidor coordinador del grid de cómputo
 - **Collector:** Servidor que recolecta métricas de monitoreo
 - **Agente:** Proceso que monitorea un worker local
+```
