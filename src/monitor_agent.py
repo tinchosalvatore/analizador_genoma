@@ -98,33 +98,66 @@ class MonitorAgent:
 
         # Envía métricas al Collector via TCP
     async def send_to_collector(self, metrics: dict):
-        loop = asyncio.get_running_loop()   # definimos al Scheduler
-        client_socket = None
+        """
+        Envía métricas al Collector via TCP con soporte Dual-Stack (IPv4 + IPv6).
+        Intenta todas las direcciones disponibles hasta que una funcione.
+        """
+        loop = asyncio.get_running_loop()
+        
         try:
-            # IPv4 TCP
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.setblocking(False)
-
-            # Conectamos los sockets de forma asíncrona
-            await loop.sock_connect(client_socket, (self.collector_host, self.collector_port))
+            # ✅ Obtener todas las direcciones del Collector (IPv4 e IPv6)
+            addrs = await loop.getaddrinfo(
+                self.collector_host, 
+                self.collector_port,
+                family=socket.AF_UNSPEC,  # Permite IPv4 o IPv6
+                type=socket.SOCK_STREAM
+            )
             
-            message = {
-                'type': 'metrics',
-                'data': metrics
-            }
+            logger.debug(f"Direcciones del Collector obtenidas: {len(addrs)} direcciones", 
+                         extra={'worker_id': self.worker_id})
             
-            # Enviamos datos de forma asíncrona
-            await loop.sock_sendall(client_socket, json.dumps(message).encode())
+            # ✅ Intentar conectar a cada dirección (Dual-Stack fallback)
+            last_error = None
+            for family, socktype, proto, canonname, sockaddr in addrs:
+                client_socket = None
+                try:
+                    # Crear socket con la familia correcta (AF_INET o AF_INET6)
+                    client_socket = socket.socket(family, socktype, proto)
+                    client_socket.setblocking(False)
+                    
+                    logger.debug(f"Intentando conectar al Collector en {sockaddr}", 
+                                extra={'worker_id': self.worker_id, 'family': 'IPv6' if family == socket.AF_INET6 else 'IPv4'})
+                    
+                    # Conectar de forma asíncrona
+                    await loop.sock_connect(client_socket, sockaddr)
+                    
+                    # ✅ Conexión exitosa, enviar métricas
+                    message = {'type': 'metrics', 'data': metrics}
+                    await loop.sock_sendall(client_socket, json.dumps(message).encode())
+                    
+                    logger.info(f"Métricas de {self.worker_id} enviadas al Collector.", 
+                               extra={'worker_id': self.worker_id})
+                    
+                    client_socket.close()
+                    return  # Salir después de enviar exitosamente
+                    
+                except (ConnectionRefusedError, OSError) as e:
+                    last_error = e
+                    logger.warning(f"Fallo al conectar al Collector usando {sockaddr}: {e}",
+                                  extra={'worker_id': self.worker_id})
+                    if client_socket:
+                        client_socket.close()
+                    continue  # Intentar la siguiente dirección
             
-            logger.info(f"Métricas de {self.worker_id} enviadas al Collector.")
-
-        except ConnectionRefusedError:
-            logger.error(f"Error enviando al Collector: Conexión rechazada. ¿Está el Collector corriendo en {self.collector_host}:{self.collector_port}?")
+            # Si llegamos aquí, ninguna dirección funcionó
+            error_msg = f"No se pudo conectar al Collector en {self.collector_host}:{self.collector_port}"
+            if last_error:
+                error_msg += f". Última excepción: {last_error}"
+            logger.error(error_msg, extra={'worker_id': self.worker_id})
+            
         except Exception as e:
-            logger.error(f"Error inesperado enviando al Collector: {e}")
-        finally:
-            if client_socket:   # si hay una conexión abierta, la cerramos
-                client_socket.close()
+            logger.error(f"Error inesperado enviando al Collector: {e}", 
+                        extra={'worker_id': self.worker_id}, exc_info=True)
 
 
         # levanta el agente.

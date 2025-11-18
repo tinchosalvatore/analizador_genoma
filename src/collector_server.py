@@ -189,7 +189,11 @@ class CollectorServer:
         asyncio.create_task(self.monitor_timeouts())
         
         # Usar asyncio.start_server para escuchar en todas las interfaces (IPv4 e IPv6)
-        server = await asyncio.start_server(self.handle_agent, None, self.port)
+        server = await asyncio.start_server(
+            self.handle_agent,
+            ['0.0.0.0', '::'],  # Dual-Stack: IPv4 + IPv6
+            self.port
+        )
         
         # Log all bound addresses
         for sock in server.sockets:
