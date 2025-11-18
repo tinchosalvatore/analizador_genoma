@@ -14,7 +14,7 @@ from src.utils.logger import setup_logger
 logger = setup_logger('submit_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/submit_job_client.log')
 
 
-def submit_job(server_host: str, server_port: int, file_path: str, pattern: str, chunk_size: int) -> Dict[str, Any]:
+def submit_job(server_host: str, server_port: int, file_path: str, pattern: str) -> Dict[str, Any]:
     """
     Envía un trabajo de análisis genómico al Master Server.
 
@@ -62,7 +62,7 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str,
             "job_id": job_id,
             "filename": os.path.basename(file_path),
             "pattern": pattern,
-            "chunk_size": chunk_size,
+            "chunk_size": DEFAULT_CHUNK_SIZE,
             "file_size": file_size,
             "file_data_b64": file_data_b64
         }
@@ -124,11 +124,11 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=MASTER_PORT, help='Puerto del Master Server.')
     parser.add_argument('--file', type=str, required=True, help='Ruta al archivo de genoma a analizar.')
     parser.add_argument('--pattern', type=str, required=True, help='Patrón de ADN a buscar (ej: AGGTCCAT).')
-    parser.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE, help=f'Tamaño de los chunks en bytes (por defecto: {DEFAULT_CHUNK_SIZE} = 1MB).')
+
     
     args = parser.parse_args()
 
-    response = submit_job(args.server, args.port, args.file, args.pattern, args.chunk_size)
+    response = submit_job(args.server, args.port, args.file, args.pattern)
 
     if response.get("status") == "accepted":
         print(f"Job submitted successfully!")
