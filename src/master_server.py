@@ -54,7 +54,22 @@ class MasterServer:
     # Maneja las conexiones entrantes de los clientes de manera asincrona
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
-        logger.info(f"Conexión aceptada de {addr}")
+        
+        # La tupla de addr tiene 2 elementos para IPv4 (host, port)
+        # y 4 elementos para IPv6 (host, port, flowinfo, scopeid)
+        ip_familia = "IPv4" if len(addr) == 2 else "IPv6"
+        ip_cliente, puerto_cliente = addr[0], addr[1]
+        
+        # logger que indica quien esta conectado al master!  (para demostrar que trabaja IPv6 o IPv4 segun se solicita)
+        logger.info(
+            "Nueva conexión recibida",
+            extra={
+                'client_ip': ip_cliente,
+                'client_port': puerto_cliente,
+                'ip_family': ip_familia,
+                'full_addr': str(addr)
+            }
+        )
 
         try:
             # 1. Bucle de lectura de datos (¡ESTE ES EL ARREGLO!)
@@ -222,14 +237,14 @@ class MasterServer:
                 file_data_b64
             )
             
-            if total_chunks == -1: # Error en el hilo
+            if total_chunks == -1: # significa que hubo un error
                 raise Exception("Falló el _blocking_enqueue_work")
 
             # 3. Actualizar Redis con la info final (rápido, no bloquea)
             # (Nota: La línea 'hset("total_chunks")' ya la quitamos en el paso anterior, ¡lo cual es correcto!)
             if task_ids:
                 await self.redis.rpush(f"job:{job_id}:task_ids", *task_ids)
-                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24)
+                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24)  # expira en 24 horas
 
             logger.info(f"Encolado en background (async) completado para job {job_id}. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
 
@@ -291,8 +306,6 @@ class MasterServer:
     async def _handle_query_status(self, message: Dict[str, Any]) -> Dict[str, Any]:
         job_id = message['job_id']
         logger.info(f"Consulta de estado para job {job_id}", extra={'job_id': job_id})
-
-        logger.info(f"¡¡¡PRUEBA DE NUEVO CÓDIGO!!! Job {job_id}")
 
         job_info = await self.redis.hgetall(f"job:{job_id}")    # hgetall devuelve un diccionario con todos los jobs encolados
         if not job_info:

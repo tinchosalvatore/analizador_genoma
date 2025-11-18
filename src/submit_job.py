@@ -8,13 +8,12 @@ from typing import Dict, Any
 
 # Importar configuración
 from src.config.settings import MASTER_HOST, MASTER_PORT, DEFAULT_CHUNK_SIZE
-
 from src.utils.logger import setup_logger
 
 logger = setup_logger('submit_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/submit_job_client.log')
 
 
-def submit_job(server_host: str, server_port: int, file_path: str, pattern: str) -> Dict[str, Any]:
+def submit_job(server_host: str, server_port: int, file_path: str, pattern: str, ip_family: str | None = None) -> Dict[str, Any]:
     """
     Envía un trabajo de análisis genómico al Master Server.
 
@@ -23,7 +22,7 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str)
         server_port: Puerto del Master Server.
         file_path: Ruta al archivo de genoma a analizar.
         pattern: Patrón de ADN a buscar.
-        chunk_size: Tamaño de los chunks para dividir el archivo.
+        ip_family: 'ipv4' o 'ipv6' para forzar una familia de IP, o None para permitir cualquiera.
 
     Returns:
         Un diccionario con la respuesta del servidor.
@@ -69,15 +68,24 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str)
 
         logger.info(f"Enviando trabajo {job_id} al Master Server...", extra={'job_id': job_id, 'server': f'{server_host}:{server_port}'})
 
-        # Obtener todas las direcciones posibles (IPv4 e IPv6)
-        addrs = socket.getaddrinfo(server_host, server_port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        # Determinar la familia de IP a utilizar
+        family_to_use = socket.AF_UNSPEC
+        if ip_family == 'ipv4':
+            family_to_use = socket.AF_INET
+        elif ip_family == 'ipv6':
+            family_to_use = socket.AF_INET6
         
+        log_family_str = ip_family.upper() if ip_family else 'La que se detecte con UNSPEC'
+        logger.info(f"Resolviendo host {server_host} con familia de socket forzada a: {log_family_str}")
+
+        addrs = socket.getaddrinfo(server_host, server_port, family_to_use, socket.SOCK_STREAM)
+
         sock = None
         for family, socktype, proto, canonname, sockaddr in addrs:
             try:
                 sock = socket.socket(family, socktype, proto)
                 sock.connect(sockaddr)
-                logger.info(f"Conectado a Master Server en {sockaddr} usando {family}", extra={'job_id': job_id, 'sockaddr': sockaddr, 'family': family})
+                logger.info(f"Conectado a Master Server en {sockaddr} usando {family}", extra={'job_id': job_id, 'sockaddr': sockaddr, 'family': str(family)})
                 break # Conexión exitosa
             except OSError as e:
                 logger.warning(f"Fallo al conectar a {sockaddr}: {e}")
@@ -86,25 +94,20 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str)
                 sock = None
         
         if sock is None:
-            logger.error(f"No se pudo conectar a {server_host}:{server_port} en ninguna dirección disponible.")
-            return {"status": "error", "message": "No se pudo conectar al Master Server."}
+            error_message = f"No se pudo conectar a {server_host}:{server_port} en ninguna dirección disponible (familia forzada: {log_family_str})."
+            logger.error(error_message)
+            return {"status": "error", "message": error_message}
 
-        with sock: # Usar el socket conectado
-            # enviamos todos los datos
+        with sock:
             sock.sendall(json.dumps(message).encode('utf-8'))
-            
-            # Notificamos al servidor que terminamos de enviar datos, para que sepa que debe dejar de leer y empezar a procesar.
-            sock.shutdown(socket.SHUT_WR)
-
-            response_data = sock.recv(4096) # Leer la respuesta del servidor
+            sock.shutdown(socket.SHUT_WR)  
+            response_data = sock.recv(4096)
             
             if not response_data:
                 logger.error("El servidor cerró la conexión sin enviar respuesta.")
                 return {"status": "error", "message": "Sin respuesta del servidor."}
-            
 
             response = json.loads(response_data.decode('utf-8'))
-            
             logger.info(f"Respuesta del Master Server para job {job_id}: {response}", extra={'job_id': job_id, 'response': response})
             return response
 
@@ -124,14 +127,14 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=MASTER_PORT, help='Puerto del Master Server.')
     parser.add_argument('--file', type=str, required=True, help='Ruta al archivo de genoma a analizar.')
     parser.add_argument('--pattern', type=str, required=True, help='Patrón de ADN a buscar (ej: AGGTCCAT).')
+    parser.add_argument('--ip-family', type=str, choices=['ipv4', 'ipv6'], help='Forzar el uso de una familia de IP específica (ipv4 o ipv6).')
 
-    
     args = parser.parse_args()
 
-    response = submit_job(args.server, args.port, args.file, args.pattern)
+    response = submit_job(args.server, args.port, args.file, args.pattern, ip_family=args.ip_family)
 
     if response.get("status") == "accepted":
-        print(f"Job submitted successfully!")
+        print("Job submitted successfully!")
         print(f"Job ID: {response.get('job_id')}")
         print(f"Total chunks: {response.get('total_chunks')}")
         print(f"Estimated time: {response.get('estimated_time')} seconds")

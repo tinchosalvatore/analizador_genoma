@@ -263,7 +263,12 @@ networks:
   # Define la red llamada 'genome-network'. En donde conectamos a todos los servicios previamente
   # Ahora pueden comunicarse entre sí usando sus nombres de servicio como si fueran DNS.
   genome-network:
-    driver: bridge # 'bridge' es el driver de red por defecto y más común.
+    driver: bridge
+    enable_ipv6: true  # ¡Habilitar IPv6 en la red!
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16 # Subred IPv4 (la que probablemente usa por defecto)
+        - subnet: fd00::/80     # Subred IPv6 (un rango local único)
 
 # 'volumes' define los volúmenes que Docker gestionará.
 volumes:

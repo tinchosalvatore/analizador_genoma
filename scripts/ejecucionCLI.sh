@@ -4,13 +4,13 @@
 
 # Configuración
 FILE_PATH="data/genome_200MB.txt"
-PATTERN="ACGT"
+PATTERN="ACCTGT"
 LOG_DIR="./local_log"
 QUERY_INTERVAL=0.1 # Intervalo de consulta en segundos
 
 echo "Paso 1: Enviando el trabajo..."
 # Ejecutar submit_job.py y capturar la salida
-SUBMIT_OUTPUT=$(PYTHONPATH=./src LOG_DIR=${LOG_DIR} python -m src.submit_job --file ${FILE_PATH} --pattern ${PATTERN})
+SUBMIT_OUTPUT=$(PYTHONPATH=./src LOG_DIR=${LOG_DIR} python -m src.submit_job --file ${FILE_PATH} --pattern ${PATTERN} --port 5000)
 SUBMIT_EXIT_CODE=$?
 
 if [ ${SUBMIT_EXIT_CODE} -ne 0 ]; then
