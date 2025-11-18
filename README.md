@@ -77,7 +77,7 @@ El proyecto consiste en dos sistemas distribuidos que operan simultáneamente:
 
 Para una comprensión visual de la arquitectura, consulte los siguientes diagramas:
 
-*   **Arquitectura General:** [Diagrama del Sistema Distribuido](docs/diagramas/diagrama-logico.png)
+*   **Arquitectura General:** ![Diagrama del Sistema Distribuido](docs/diagramas/diagrama-logico.png)
 *   **Arquitectura de Contenedores (Docker):** [Diagrama de Contenedores](#71-arquitectura-de-contenedores)
 
 ### 2.2 Topología de Red
