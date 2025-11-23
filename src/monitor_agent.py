@@ -6,26 +6,37 @@ import socket
 import argparse
 import os
 
+from src.config.settings import COLLECTOR_HOST, COLLECTOR_PORT, AGENT_REPORT_INTERVAL, HEARTBEAT_TIMEOUT
 from src.utils.logger import setup_logger
 
+# iniciamos el log
 logger = setup_logger('monitor_agent', f'{os.getenv("LOG_DIR", "/app/logs")}/monitor_agent.log')
 
 class MonitorAgent:
-    def __init__(self, worker_id: str, collector_host: str, collector_port: int, ipc_socket_path: str):
+    def __init__(self, worker_id: str, collector_host: str, collector_port: int, ipc_socket_path: str, report_interval: int, heartbeat_timeout: int):
+        
+        # todos los valores que son del settings.py entran por el argparse como valor por defecto
         self.worker_id = worker_id
         self.collector_host = collector_host
         self.collector_port = collector_port
         self.ipc_socket_path = ipc_socket_path
+        self.report_interval = report_interval
+        self.heartbeat_timeout = heartbeat_timeout
         self.last_heartbeat = time.time()
-        self.status = "ALIVE"     # el estado por defecto es "ALIVE"
+        self.status = "ALIVE"     # el estado por defecto de los worker es "ALIVE"
         
+        # si no existe el directorio del socket, lo creamos 
         socket_dir = os.path.dirname(self.ipc_socket_path)
         if not os.path.exists(socket_dir):
             os.makedirs(socket_dir)
 
 
-        # Escucha heartbeats del worker via Unix socket
     async def listen_ipc_heartbeat(self):
+        """
+        Escucha heartbeats del worker via Unix socket
+        """
+
+        # en caso de que el ultimo quedo corrupto, lo borramos y creamos limpio de nuevo
         if os.path.exists(self.ipc_socket_path):
             os.remove(self.ipc_socket_path)
 
@@ -46,7 +57,7 @@ class MonitorAgent:
         # Bucle para aceptar conexiones de forma asíncrona
         while True:
             try:
-                conn, addr = await loop.sock_accept(server_socket)    # espera a que inicie la conexion
+                conn, addr = await loop.sock_accept(server_socket)    # espera con await a que inicie la conexion
                 logger.debug(f"Nueva conexión de heartbeat recibida en {self.ipc_socket_path}")
                 # Crear una tarea usando el loop de asyncio, usando el handler que definimos abajo
                 loop.create_task(self.handle_worker_heartbeat(conn))
@@ -54,8 +65,10 @@ class MonitorAgent:
                 logger.error(f"Error aceptando conexión en socket IPC: {e}")
 
 
-    # Recibe heartbeat del worker desde una conexión de socket UNIX
     async def handle_worker_heartbeat(self, conn: socket.socket):
+        """
+        Maneja las conexiones de heartbeat de los workers.
+        """
         loop = asyncio.get_running_loop()  # definimos al Scheduler
         try:
             # Leer del socket de forma asíncrona
@@ -64,7 +77,7 @@ class MonitorAgent:
                 return
 
             message = json.loads(data.decode())
-            if message.get('type') == 'heartbeat':
+            if message.get('type') == 'heartbeat':   # si el msj es un heartbeat y no es corrupto
                 self.last_heartbeat = time.time()
                 if self.status == "DEAD":  # llega un heartbeat a uno que estaba DEAD, entonces ahora está ALIVE
                     logger.info(f"Worker {self.worker_id} se ha recuperado (estaba DEAD). Nuevo status: ALIVE")
@@ -75,13 +88,17 @@ class MonitorAgent:
             conn.close()  # cierra la conexion con el socket del worker
 
 
-    # Recolecta métricas del sistema y las reporta al Collector.
     async def collect_and_report_metrics(self):
-        while True:
-            await asyncio.sleep(10)  # reporta cada 10 seg
+        """
+        Recolecta métricas del sistema y las reporta al Collector Server.
+        """
 
-            if time.time() - self.last_heartbeat > 15 and self.status == "ALIVE":
-                logger.warning(f"Worker {self.worker_id} no ha enviado heartbeat en 15s. Status: DEAD")
+        while True:
+            await asyncio.sleep(self.report_interval)
+
+            # si no hubo un heartbeat en el timeout, cambiamos el status a DEAD 
+            if time.time() - self.last_heartbeat > self.heartbeat_timeout and self.status == "ALIVE":
+                logger.warning(f"Worker {self.worker_id} no ha enviado heartbeat en {self.heartbeat_timeout}s. Status: DEAD")
                 self.status = "DEAD"
 
             # msj json siguiendo el protocolo
@@ -93,7 +110,7 @@ class MonitorAgent:
                 'memory_percent': psutil.virtual_memory().percent
             }
 
-            await self.send_to_collector(metrics)  
+            await self.send_to_collector(metrics)   # llamamos a la corrutina diseñada para enviar las metricas
 
 
         # Envía métricas al Collector via TCP
@@ -105,7 +122,7 @@ class MonitorAgent:
         loop = asyncio.get_running_loop()
         
         try:
-            # ✅ Obtener todas las direcciones del Collector (IPv4 e IPv6)
+            # Obtener todas las direcciones del Collector (IPv4 e IPv6)
             addrs = await loop.getaddrinfo(
                 self.collector_host, 
                 self.collector_port,
@@ -116,7 +133,7 @@ class MonitorAgent:
             logger.debug(f"Direcciones del Collector obtenidas: {len(addrs)} direcciones", 
                          extra={'worker_id': self.worker_id})
             
-            # ✅ Intentar conectar a cada dirección (Dual-Stack fallback)
+            # Intentar conectar a cada dirección (Dual-Stack fallback)
             last_error = None
             for family, socktype, proto, canonname, sockaddr in addrs:
                 client_socket = None
@@ -131,7 +148,8 @@ class MonitorAgent:
                     # Conectar de forma asíncrona
                     await loop.sock_connect(client_socket, sockaddr)
                     
-                    # ✅ Conexión exitosa, enviar métricas
+                    # si llego aca, la conexión fue exitosa
+                    # enviamos las métricas
                     message = {'type': 'metrics', 'data': metrics}
                     await loop.sock_sendall(client_socket, json.dumps(message).encode())
                     
@@ -164,7 +182,7 @@ class MonitorAgent:
     async def run(self):
         logger.info(f"Iniciando agente para worker: {self.worker_id}")
         
-        # .gather es para ejecutar varias tareas al mismo tiempo, dentro del mismo awaits
+        # .gather es para ejecutar varias tareas al mismo tiempo, dentro del mismo await
         await asyncio.gather(
             self.listen_ipc_heartbeat(),
             self.collect_and_report_metrics()
@@ -172,13 +190,14 @@ class MonitorAgent:
 
 
 def main():
-
-    # permitimos parsear argumentos como elegir puerto y path del socket, a que worker monitorear, etc
+    # aca ponemos los valores del settings.py como default en las variables del primer constructor
     parser = argparse.ArgumentParser(description="Agente de Monitoreo para un Worker.")
     parser.add_argument('--worker-id', required=True, help='ID único del worker a monitorear.')
-    parser.add_argument('--collector-host', default='localhost', help='Host del Collector Server.')
-    parser.add_argument('--collector-port', type=int, default=6000, help='Puerto del Collector Server.')
+    parser.add_argument('--collector-host', default=COLLECTOR_HOST, help='Host del Collector Server.')
+    parser.add_argument('--collector-port', type=int, default=COLLECTOR_PORT, help='Puerto del Collector Server.')
     parser.add_argument('--ipc-socket-path', help='Ruta al Unix Domain Socket para IPC.')
+    parser.add_argument('--report-interval', type=int, default=AGENT_REPORT_INTERVAL, help='Intervalo en segundos para reportar métricas.')
+    parser.add_argument('--heartbeat-timeout', type=int, default=HEARTBEAT_TIMEOUT, help='Tiempo en segundos sin heartbeat para considerar al worker como DEAD.')
     args = parser.parse_args()
 
     # generamos el path del socket dentro de /tmp para que sea temporal y se borra al apagar el container
@@ -188,7 +207,9 @@ def main():
         worker_id=args.worker_id,
         collector_host=args.collector_host,
         collector_port=args.collector_port,
-        ipc_socket_path=ipc_socket_path
+        ipc_socket_path=ipc_socket_path,
+        report_interval=args.report_interval,
+        heartbeat_timeout=args.heartbeat_timeout
     )
     
     try:

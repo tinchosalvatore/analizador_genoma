@@ -1,13 +1,13 @@
 from typing import Any, Dict, Tuple
 
 """
-Esquemas de validación para los diferentes tipos de mensajes
+Interfaces genericas de como deberian lucir los mensajes que transitan por el sistema
+Comunicaciones entre los Workers y Agents. Servidor Master y el Cliente CLI, etc
+
 Definiciones basadas en la Sección 4 del README.md
 """
 
 
-# Interfaces genericas de como deberian lucir los mensajes que transitan por el sistema
-# Comunicaciones entre los Workers y Agents. Servidor Master y el Cliente CLI, etc
 MESSAGE_SCHEMAS = {
 
     # Peticiones del Cliente CLI
@@ -33,7 +33,7 @@ MESSAGE_SCHEMAS = {
         }
     },
 
-    # Almacenamiento en REDIS de metricas + comunicacion entre Workers y Agents
+    # Metricas de los workers almacenadas en Redis
     "metrics": {
         "required": ["type", "data"],
         "properties": {
@@ -81,8 +81,8 @@ def validate_message(message: Dict[str, Any], message_type: str) -> Tuple[bool, 
     Valida los mensaje JSON que circulan en el sistema con las interfaces predefinidas.
 
     Args:
-        message: El diccionario del mensaje JSON a validar (osea el que entra).
-        message_type: El tipo de mensaje esperado, osea con el que se compara (ej. 'submit_job', 'metrics').
+        message: El diccionario del mensaje JSON a validar (osea el real, que circula).
+        message_type: El nombre del esquema con el que se compara el 'message' (ej. 'submit_job', 'metrics').
 
     Returns:
         Una tupla (bool, str) donde el booleano indica si es válido y el string contiene un mensaje de error o "OK"
@@ -91,7 +91,7 @@ def validate_message(message: Dict[str, Any], message_type: str) -> Tuple[bool, 
     if not schema:
         return False, f"Esquema de validación no encontrado para el tipo de mensaje: {message_type}"
 
-    # primero valida por keys, cada campo requerido
+    # primero valida que esten todos los campos requeridos
     for field in schema.get("required", []):
         if field not in message:
             return False, f"Campo requerido '{field}' ausente en el mensaje de tipo '{message_type}'."

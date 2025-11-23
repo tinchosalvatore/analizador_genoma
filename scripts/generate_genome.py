@@ -7,7 +7,7 @@ def generate_genome(size_mb: int, output_file: str):
     size_bytes = size_mb * 1024 * 1024    # Calcula cuandos bytes son los MB que ingresamos con el argparse
     
     with open(output_file, 'w') as f:
-        # Escribir en líneas de 60 caracteres (formato FASTA)
+        # Escribir en líneas de 60 caracteres
         chars_written = 0
         while chars_written < size_bytes:
             line = ''.join(random.choices(nucleotides, k=60))

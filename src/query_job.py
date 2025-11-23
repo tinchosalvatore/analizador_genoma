@@ -8,12 +8,12 @@ from typing import Dict, Any
 # Importar configuración
 from src.config.settings import MASTER_HOST, MASTER_PORT
 
-# Importar logger (opcional para un cliente CLI simple, pero buena práctica)
+# configurar el logger
 from src.utils.logger import setup_logger
 logger = setup_logger('query_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/query_job_client.log')
 
 
-def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[str, Any]:
+def query_job_status(server_host: str, server_port: int, job_id: str, ip_family: str | None = None) -> Dict[str, Any]:
     """
     Consulta el estado de un trabajo al Master Server.
 
@@ -26,29 +26,41 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
         Un diccionario con la respuesta que envio el servidor.
     """
     message = {
-        "type": "query_status",
+        "type": "query_status",  # para que el protocolo lo revise
         "job_id": job_id
     }
 
     logger.info(f"Consultando estado del job {job_id} al Master Server...", extra={'job_id': job_id, 'server': f'{server_host}:{server_port}'})
 
     try:
-        # Obtener todas las direcciones posibles (IPv4 e IPv6)
-        addrs = socket.getaddrinfo(server_host, server_port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        # Determinar la familia de IP a utilizar con argparse (si es None, hace el UNSPEC)
+        family_to_use = socket.AF_UNSPEC
+        if ip_family == 'ipv4':
+            family_to_use = socket.AF_INET
+        elif ip_family == 'ipv6':
+            family_to_use = socket.AF_INET6
         
-        sock = None
+        ip_family_str = ip_family.upper() if ip_family else 'La que se detecte con UNSPEC' # para los logs
+        logger.info(f"Resolviendo host {server_host} con familia de socket forzada a: {ip_family_str}")
+
+
+    # obtenemos datos clave sobre el socket al que nos vamos a conectar (el Master Server)
+        addrs = socket.getaddrinfo(server_host, server_port, family_to_use, socket.SOCK_STREAM)
+        
+        sock = None  # si se mantiene None al final es porque fallo la conexion
         for family, socktype, proto, canonname, sockaddr in addrs:
             try:
                 sock = socket.socket(family, socktype, proto)
                 sock.connect(sockaddr)
                 logger.info(f"Conectado a Master Server en {sockaddr} usando {family}", extra={'job_id': job_id, 'sockaddr': sockaddr, 'family': family})
-                break # Conexión exitosa
+                break # se rompe junto a la primer conexion exitosa
             except OSError as e:
                 logger.warning(f"Fallo al conectar a {sockaddr}: {e}")
                 if sock:
                     sock.close()
                 sock = None
         
+        # fallo la conexion
         if sock is None:
             logger.error(f"No se pudo conectar a {server_host}:{server_port} en ninguna dirección disponible.")
             return {"status": "error", "message": "No se pudo conectar al Master Server."}
@@ -59,7 +71,7 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
             # Señalizamos que hemos terminado de enviar la petición
             sock.shutdown(socket.SHUT_WR)
 
-            # Para mas robustez, leemos toda la respuesta hasta que el servidor cierre (EOF)
+            # Para mas robustez, leemos toda la respuesta hasta que el servidor cierre
             response_chunks = []
             while True:
                 chunk = sock.recv(4096) 
@@ -74,8 +86,8 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
                 logger.error(f"El servidor cerró la conexión sin enviar respuesta.", extra={'job_id': job_id})
                 return {"status": "error", "message": "El servidor cerró la conexión sin enviar respuesta."}
 
-            response = json.loads(response_data.decode('utf-8'))  #decodifica la respuesta
-            
+            # decodificamos y devolvemos la respuesta del master
+            response = json.loads(response_data.decode('utf-8'))  
             logger.info(f"Respuesta del Master Server para job {job_id}: {response}", extra={'job_id': job_id, 'response': response})
             return response
 
@@ -89,6 +101,9 @@ def query_job_status(server_host: str, server_port: int, job_id: str) -> Dict[st
     except Exception as e:
         logger.error(f"Ocurrió un error inesperado: {e}", exc_info=True)
         return {"status": "error", "message": f"Error inesperado: {e}"}
+
+
+# <=================  GENERACION HTML con CSS  =================>
 
 def generate_html_report(job_id: str, response: Dict[str, Any]) -> str:
     status = response.get('status', 'N/A').upper()
@@ -190,23 +205,29 @@ def generate_html_report(job_id: str, response: Dict[str, Any]) -> str:
     """
     return html_content
 
+
+# <=================  FIN GENERACION HTML con CSS  =================>
+
+
 if __name__ == "__main__":
 
-    # permitimos elegir puerto, host y job_id con argparse. Tambien que muestre los resultados finales
+    # argumentos del argparse
     parser = argparse.ArgumentParser(description="Cliente para consultar el estado de un trabajo de análisis genómico.")
     parser.add_argument('--server', type=str, default=MASTER_HOST, help='Dirección IP o hostname del Master Server.')
     parser.add_argument('--port', type=int, default=MASTER_PORT, help='Puerto del Master Server.')
     parser.add_argument('--job-id', type=str, required=True, help='ID del trabajo a consultar.')
     parser.add_argument('--show-results', action='store_true', help='Muestra los resultados finales si el trabajo está completado.')
     parser.add_argument('--output-html', type=str, help='Genera un reporte HTML del estado del trabajo en el archivo especificado.')
+    parser.add_argument('--ip-family', type=str, choices=['ipv4', 'ipv6'], help='Forzar el uso de una familia de IP específica (ipv4 o ipv6).')
     
     args = parser.parse_args()
 
-    response = query_job_status(args.server, args.port, args.job_id)
+    response = query_job_status(args.server, args.port, args.job_id, ip_family=args.ip_family)
 
     if response.get("status") == "error":
         print(f"\n❌ Error al consultar el estado del job: {response.get('message', 'Unknown error')}")
-    else:
+    
+    else:  # consigue toda la info para imprimir en pantalla
         job_id = response.get('job_id')
         status = response.get('status', 'N/A').upper()
         progress = response.get('progress', {})
@@ -220,7 +241,7 @@ if __name__ == "__main__":
         print(f"  Estado Actual: {status}")
         
         if total_chunks > 0:
-            # Barra de progreso simple
+            # Barra de progreso simple con porcentaje
             bar_length = 20
             filled_length = int(bar_length * percentage // 100)
             bar = '█' * filled_length + '-' * (bar_length - filled_length)
@@ -246,7 +267,8 @@ if __name__ == "__main__":
         else:
             print(f"\n❓ Estado desconocido para el trabajo {job_id}.")
 
-        # Generar reporte HTML si se solicita y el trabajo está completado
+
+        # Generar reporte HTML cuando la solicitud de trabajo indica que se ha completado
         if args.output_html and status == "COMPLETED":
             try:
                 html_report_content = generate_html_report(job_id, response)

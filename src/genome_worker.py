@@ -1,24 +1,22 @@
 from celery import Celery
+from celery.signals import worker_process_init
 import os
 import json
 import time
 import redis
-import re
+import re   # para la busqueda de patrones
 import socket
 import base64
 from typing import Dict, Any
 
-# los usamos para arreglar el tema de los heartbeats
+# los usamos para mandar los heartbeats
 import threading
-from celery.signals import worker_process_init
 
 
 # Importar configs y el logger
-from src.config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH
+from src.config.settings import REDIS_HOST, REDIS_PORT, WORKER_ID, IPC_SOCKET_PATH # archivo del socket UNIX
 from src.utils.logger import setup_logger
 
-# Variable global para control de heartbeats
-_last_heartbeat_time = 0
 
 # Configurar el logger para el worker
 logger = setup_logger(f'genome_worker_{WORKER_ID}', f'{os.getenv("LOG_DIR", "/app/logs")}/genome_worker_{WORKER_ID}.log')
@@ -38,13 +36,12 @@ app.conf.update(
     worker_max_tasks_per_child=2000
 )
 
-# Se inicializa vacio para que cada proceso worker tenga su propia conexión
 redis_client = None
 
-    # Obtiene o inicializa el cliente Redis. Esta funcion la va a ejecutar cada proceso worker
+    # Inicializa el cliente Redis. Esta funcion la va a ejecutar cada proceso worker
 def get_redis_client():
     global redis_client
-    # Cuando un nuevo proceso worker es "forkeado", redis_client será None OTRA VEZ.
+    # Cuando un nuevo proceso worker es forkeado, redis_client será None OTRA VEZ.
     if redis_client is None:
         try:
             # Creamos una conexión NUEVA para este proceso worker específico.
@@ -61,7 +58,7 @@ def get_redis_client():
     return redis_client
 
 
-# Variable global para trackear último heartbeat
+# Variable global para trackear el tiempo del último heartbeat
 _last_heartbeat_time = 0
 
 def send_heartbeat_to_agent(tasks_completed: int = 0):
@@ -73,20 +70,23 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
     
     # Limitar frecuencia: solo enviar cada 5 segundos
     current_time = time.time()
-    if current_time - _last_heartbeat_time < 5:
-        return  # Skip este heartbeat
+    if current_time - _last_heartbeat_time < 5:  # si fue hace menos de 5 segundos skippeamos el heartbeat
+        return  
     
     _last_heartbeat_time = current_time
     
+    # path definido en settings.py
     sock_path = IPC_SOCKET_PATH.format(worker_id=WORKER_ID)
     
     try:
+        # creamos socket unix 
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         
         client.settimeout(1.0)
         
-        client.connect(sock_path)
+        client.connect(sock_path)  # nos conectamos al archivo del socket
         
+        # mandamos el heartbeat
         message = {
             'type': 'heartbeat',
             'timestamp': time.time(),
@@ -95,6 +95,8 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
         client.send(json.dumps(message).encode('utf-8'))
         client.close()
         logger.debug(f"Heartbeat enviado al agente en {sock_path}", extra={'worker_id': WORKER_ID, 'tasks_completed': tasks_completed})
+    
+    # errores
     except FileNotFoundError:
         logger.warning(f"Socket de agente no encontrado en {sock_path}. El agente podría no estar corriendo aún.", extra={'worker_id': WORKER_ID})
     except ConnectionRefusedError:
@@ -108,14 +110,11 @@ def send_heartbeat_to_agent(tasks_completed: int = 0):
 def _heartbeat_thread():
     """
     Un hilo que corre en segundo plano y envía un heartbeat cada 5 segundos.
-    Esto mantiene al monitor_agent informado de que el proceso worker está vivo,
-    incluso si está ocioso.
+    Esto mantiene al monitor_agent informado de que el proceso worker está vivo, incluso si está ocioso.
     """
     while True:
         try:
             # Enviamos un heartbeat con 0 tareas completadas (solo es liveness)
-            # La función 'send_heartbeat_to_agent' ya tiene un rate-limit
-            # interno de 5s, pero dormir aquí es más limpio.
             send_heartbeat_to_agent(0)
         except Exception as e:
             # Loggear, pero nunca dejar que el hilo muera
@@ -123,6 +122,7 @@ def _heartbeat_thread():
         
         # Esperar 5 segundos para el próximo latido
         time.sleep(5)
+
 
 # esta es la señal que se dispara cuando se inicia un proceso worker, mandando con hilos los heartbeats constantemente
 @worker_process_init.connect
@@ -133,8 +133,8 @@ def on_worker_process_init(**kwargs):
     """
     logger.info("Proceso worker inicializado. Iniciando hilo de heartbeat...")
     
-    # Iniciar el hilo como 'daemon' para que muera automáticamente
-    # cuando el proceso principal del worker muera.
+    # Iniciar el hilo como 'daemon' para que muera automáticamente 
+    # cuando se crea un nuevo proceso worker
     t = threading.Thread(target=_heartbeat_thread, daemon=True)
     t.start()
 
@@ -152,8 +152,8 @@ def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, An
     Returns:
         {
             'chunk_id': int,
-            'matches': int,      # cantidad de veces que se encontro el patrón
-            'positions': [list of positions],  # Posiciones absolutas en el archivo original COMPLETO
+            'matches': int,      
+            'positions': [list of positions],  # Posiciones absolutas en el archivo original
             'processing_time': float
         }
     """
@@ -172,7 +172,7 @@ def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, An
         # Busca el patrón (usando regex simple)
         matches = list(re.finditer(pattern, text))
         
-        result = {
+        result = {  # resultado de un chunk
             'chunk_id': chunk_id,
             'matches': len(matches),
             'positions': [m.start() + offset for m in matches], # Posiciones absolutas en el archivo original
@@ -188,9 +188,9 @@ def find_pattern(self, chunk_data_b64: str, pattern: str, metadata: Dict[str, An
                 json.dumps(result)
             )
             logger.info(f"Resultado parcial guardado para job {job_id}, chunk {chunk_id}", extra={'job_id': job_id, 'chunk_id': chunk_id, 'matches': len(matches)})
-            # Incrementar contador atómico de chunks procesados
+            
+            # Incrementar contadores almacenados en Redis, de manera atómica
             r_client.hincrby(f"job:{job_id}", "processed_chunks", 1)
-            # Incrementar contador atómico de matches encontrados
             r_client.hincrby(f"job:{job_id}", "total_matches", len(matches))
         else:
             logger.error(f"No se pudo guardar el resultado parcial para job {job_id}, chunk {chunk_id}. Cliente Redis no disponible.")

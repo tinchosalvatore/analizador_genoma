@@ -4,7 +4,7 @@ from src.config.settings import DEFAULT_CHUNK_SIZE
 def divide_data_with_overlap(data: bytes, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = 100) -> Generator[Tuple[int, bytes, Dict[str, any]], None, None]:
     """
     Divide un objeto bytes en chunks de tamaño fijo con un solapamiento (overlap) entre ellos.
-    El solapamiento aplica solo para un chunk posterior.
+    El solapamiento aplica solo para UN chunk posterior.
 
     Args:
         data: Los datos binarios a dividir.
@@ -19,9 +19,9 @@ def divide_data_with_overlap(data: bytes, chunk_size: int = DEFAULT_CHUNK_SIZE, 
     """
     total_size = len(data)
     chunk_id = 0
-    current_offset = 0
+    current_offset = 0  # Posicion absoluta en el archivo
     
-    while current_offset < total_size:
+    while current_offset < total_size:  
         # Calcular el inicio de la lectura para incluir el overlap del chunk anterior
         read_start_index = current_offset - (overlap if chunk_id > 0 else 0)
         # Asegurarse de no leer antes del inicio de los datos
@@ -52,13 +52,10 @@ def divide_data_with_overlap(data: bytes, chunk_size: int = DEFAULT_CHUNK_SIZE, 
         current_offset += chunk_size
         chunk_id += 1
 
-# Mantener la función original para compatibilidad si se usa con file_path
+
 def divide_file_with_overlap(file_path: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = 100) -> Generator[Tuple[int, bytes, Dict[str, any]], None, None]:
     """
-    Divide un archivo en chunks de tamaño fijo con un solapamiento (overlap) entre ellos.
-    Lee el archivo completo en memoria para luego dividirlo.
-    
-    Evitamos realizar esta operacion en Disco en el Servidor Master, para no hacer cuello de botella
+    Lee el archivo completo en memoria para ejecutar la funcion que lo divide.    
     """
     with open(file_path, 'rb') as f:
         file_data = f.read()

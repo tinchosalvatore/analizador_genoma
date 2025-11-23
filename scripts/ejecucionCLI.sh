@@ -6,7 +6,7 @@
 FILE_PATH="data/genome_200MB.txt"
 PATTERN="ACCTGT"
 LOG_DIR="./local_log"
-QUERY_INTERVAL=0.1 # Intervalo de consulta en segundos
+QUERY_INTERVAL=2 # Intervalo de consulta en segundos
 
 echo "Paso 1: Enviando el trabajo..."
 # Ejecutar submit_job.py y capturar la salida

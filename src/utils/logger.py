@@ -5,8 +5,10 @@ import os
 
 class JSONFormatter(logging.Formatter):
     
-    # Formate el log a un JSON con su formato esperado
-    def format(self, record):
+    # Formatea el log a un JSON con su formato esperado
+    def format(self, record):    # record va a ser LogRecord, el cual es el objeto que representa al LOG
+        
+        # formato base de los logs.
         log_obj = {
             'timestamp': datetime.utcnow().isoformat(),
             'level': record.levelname,
@@ -15,7 +17,7 @@ class JSONFormatter(logging.Formatter):
             'module': record.module,
             'function': record.funcName
         }
-        if record.exc_info:
+        if record.exc_info:  # si hay una excepcion en el log, la formateamos tambien
             log_obj['exception'] = self.formatException(record.exc_info)
         
         # Procesar cualquier atributo extra que no sea interno de logging
@@ -31,16 +33,17 @@ class JSONFormatter(logging.Formatter):
                 try:
                     # Intentar serializar el valor a JSON
                     json.dumps(value)
-                    log_obj[key] = value
+                    log_obj[key] = value  # le damos la forma clave-valor
                 except (TypeError, ValueError):
                     # Si no se puede serializar, convertir a string
                     log_obj[key] = str(value)
 
         return json.dumps(log_obj)
 
+# settup
 def setup_logger(name: str, log_file: str, level: str = 'INFO'):
     logger = logging.getLogger(name)   # inicializamos el logger
-    logger.setLevel(level)
+    logger.setLevel(level)   # INFO o DEBUG
 
     # Crear el directorio de logs si no existe
     log_dir = os.path.dirname(log_file)

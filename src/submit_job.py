@@ -7,10 +7,11 @@ import base64
 from typing import Dict, Any
 
 # Importar configuración
-from src.config.settings import MASTER_HOST, MASTER_PORT, DEFAULT_CHUNK_SIZE
+from src.config.settings import MASTER_HOST, MASTER_PORT, DEFAULT_CHUNK_SIZE, MAX_FILE_SIZE
 from src.utils.logger import setup_logger
 
-logger = setup_logger('submit_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/submit_job_client.log')
+#   nombre y ruta destino del logger
+logger = setup_logger('submit_job_client', f'{os.getenv("LOG_DIR", "/app/logs")}/submit_job_client.log') 
 
 
 def submit_job(server_host: str, server_port: int, file_path: str, pattern: str, ip_family: str | None = None) -> Dict[str, Any]:
@@ -27,39 +28,40 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str,
     Returns:
         Un diccionario con la respuesta del servidor.
     """
+
+    # dos verificaciones de la integridad del archivo de genoma 
     if not os.path.exists(file_path):
         logger.error(f"El archivo no existe: {file_path}")
         return {"status": "error", "message": f"El archivo no existe: {file_path}"}
-    
     if not os.path.isfile(file_path):
         logger.error(f"La ruta especificada no es un archivo: {file_path}")
         return {"status": "error", "message": f"La ruta especificada no es un archivo: {file_path}"}
 
     try:
         # Validar tamaño del archivo antes de leerlo
-        MAX_FILE_SIZE = 501 * 1024 * 1024  # 500MB
-        file_size_on_disk = os.path.getsize(file_path)
+        max_size = MAX_FILE_SIZE
+        file_size = os.path.getsize(file_path)
         
-        if file_size_on_disk > MAX_FILE_SIZE:
-            error_msg = f"Archivo demasiado grande: {file_size_on_disk/(1024*1024):.2f}MB. Máximo permitido: {MAX_FILE_SIZE/(1024*1024):.0f}MB"
-            logger.error(error_msg, extra={'file_path': file_path, 'file_size': file_size_on_disk})
+        if file_size > max_size:
+            error_msg = f"Archivo demasiado grande: {file_size/(1024*1024):.2f}MB. Máximo permitido: {max_size/(1024*1024):.0f}MB"
+            logger.error(error_msg, extra={'file_path': file_path, 'file_size': file_size})
             return {
                 "status": "error",
                 "message": error_msg
             }
         
-        with open(file_path, 'rb') as f:
+        # rb es read binary
+        with open(file_path, 'rb') as f:    
             file_data = f.read()
         
-        file_data_b64 = base64.b64encode(file_data).decode('utf-8')
-        file_size = len(file_data)
+        file_data_b64 = base64.b64encode(file_data).decode('utf-8')  # Codificar en Base64  (binario a ASCII)
 
-        job_id = str(uuid.uuid4()) # Generar un UUID único para el trabajo
+        job_id = str(uuid.uuid4()) # Generar un Identificador Unico Universal para el trabajo
 
         message = {
             "type": "submit_job",
             "job_id": job_id,
-            "filename": os.path.basename(file_path),
+            "filename": os.path.basename(file_path), # basename obtiene el nombre del archivo
             "pattern": pattern,
             "chunk_size": DEFAULT_CHUNK_SIZE,
             "file_size": file_size,
@@ -68,49 +70,57 @@ def submit_job(server_host: str, server_port: int, file_path: str, pattern: str,
 
         logger.info(f"Enviando trabajo {job_id} al Master Server...", extra={'job_id': job_id, 'server': f'{server_host}:{server_port}'})
 
-        # Determinar la familia de IP a utilizar
-        family_to_use = socket.AF_UNSPEC
+        # Determinar la familia de IP a utilizar con argparse (si es Nonen, hace el UNSPEC)
+        family_to_use = socket.AF_UNSPEC   # en mi caso detecta tanto IPv4 como IPv6 y termina usando IPv4
         if ip_family == 'ipv4':
             family_to_use = socket.AF_INET
         elif ip_family == 'ipv6':
             family_to_use = socket.AF_INET6
         
-        log_family_str = ip_family.upper() if ip_family else 'La que se detecte con UNSPEC'
-        logger.info(f"Resolviendo host {server_host} con familia de socket forzada a: {log_family_str}")
+        ip_family_str = ip_family.upper() if ip_family else 'La que se detecte con UNSPEC' # para los logs
+        logger.info(f"Resolviendo host {server_host} con familia de socket forzada a: {ip_family_str}")
 
+
+# obtenemos datos clave sobre el socket al que nos vamos a conectar (el Master Server)
         addrs = socket.getaddrinfo(server_host, server_port, family_to_use, socket.SOCK_STREAM)
 
-        sock = None
+
+# variable que va a tomar valor solo si hay una conexion (la usamos para saber si se conecto correctamente)
+        sock = None  
+
         for family, socktype, proto, canonname, sockaddr in addrs:
             try:
                 sock = socket.socket(family, socktype, proto)
                 sock.connect(sockaddr)
                 logger.info(f"Conectado a Master Server en {sockaddr} usando {family}", extra={'job_id': job_id, 'sockaddr': sockaddr, 'family': str(family)})
-                break # Conexión exitosa
+                break # se rompe con la priemr conexión exitosa
             except OSError as e:
                 logger.warning(f"Fallo al conectar a {sockaddr}: {e}")
                 if sock:
                     sock.close()
                 sock = None
         
+        # si el socket es none, es porque fallo la conexion
         if sock is None:
-            error_message = f"No se pudo conectar a {server_host}:{server_port} en ninguna dirección disponible (familia forzada: {log_family_str})."
+            error_message = f"No se pudo conectar a {server_host}:{server_port} en ninguna dirección disponible (familia forzada: {ip_family_str})."
             logger.error(error_message)
             return {"status": "error", "message": error_message}
 
         with sock:
             sock.sendall(json.dumps(message).encode('utf-8'))
-            sock.shutdown(socket.SHUT_WR)  
-            response_data = sock.recv(4096)
+            sock.shutdown(socket.SHUT_WR)  # indicador para saber que se mando toda la informacion
+            response_data = sock.recv(4096)   # es TCP asi que esperamos la respuesta del Master Server 
             
             if not response_data:
-                logger.error("El servidor cerró la conexión sin enviar respuesta.")
+                logger.error("El servidor Master cerró la conexión sin enviar respuesta.")
                 return {"status": "error", "message": "Sin respuesta del servidor."}
 
-            response = json.loads(response_data.decode('utf-8'))
+            # decodificamos y devolvemos la response del Master Server
+            response = json.loads(response_data.decode('utf-8')) 
             logger.info(f"Respuesta del Master Server para job {job_id}: {response}", extra={'job_id': job_id, 'response': response})
             return response
 
+    # multiples excepciones
     except ConnectionRefusedError:
         logger.error(f"Conexión rechazada. Asegúrate de que el Master Server esté corriendo en {server_host}:{server_port}.")
         return {"status": "error", "message": "Conexión rechazada. Master Server no disponible."}
@@ -133,6 +143,7 @@ if __name__ == "__main__":
 
     response = submit_job(args.server, args.port, args.file, args.pattern, ip_family=args.ip_family)
 
+    # si lo acepto, imprime por terminal el response para que el cliente este al tanto
     if response.get("status") == "accepted":
         print("Job submitted successfully!")
         print(f"Job ID: {response.get('job_id')}")

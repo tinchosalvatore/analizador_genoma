@@ -5,6 +5,7 @@ import json
 import base64
 import time
 import re
+import socket
 from typing import Dict, Any
 
 import redis.asyncio as aioredis # Usar la versión async de Redis
@@ -13,14 +14,14 @@ from celery import Celery
 from src.config.settings import MASTER_PORT, REDIS_HOST, REDIS_PORT, CELERY_BROKER, CELERY_BACKEND, DEFAULT_CHUNK_SIZE
 from src.utils.logger import setup_logger
 from src.utils.protocol import validate_message
-from src.utils.chunker import divide_data_with_overlap # Importar la función que divide el archivo completo
+from src.utils.chunker import divide_data_with_overlap # divide el archivo completo
 
 
 
 # Configurar el logger para el master
 logger = setup_logger('master_server', f'{os.getenv("LOG_DIR", "/app/logs")}/master_server.log')
 
-# Configuración de Celery para el Master (solo para encolar tareas)
+# Configuración de Celery para el Master (solo para encolar las tareas)
 celery_app = Celery('master_tasks', broker=CELERY_BROKER, backend=CELERY_BACKEND)
 
 # Cliente Redis asíncrono (inicializado en None)
@@ -33,7 +34,7 @@ async def get_redis_client() -> aioredis.Redis:
     global redis_client
     if redis_client is None:
         try:
-            # Forzamos al Master a usar la DB 1, la misma que usa el backend de Celery (y el worker).
+            # Forzamos al Master a usar la DB 1
             redis_client = aioredis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=1, decode_responses=True)
             await redis_client.ping() # Verificar conexión
             logger.info("Cliente Redis asíncrono inicializado para el Master (DB 1).", extra={'redis_host': REDIS_HOST, 'redis_port': REDIS_PORT})
@@ -50,9 +51,13 @@ class MasterServer:
         self.redis_client: aioredis.Redis | None = None
         logger.info(f"MasterServer inicializado en {self.host}:{self.port}")
 
+        
+    # <=========== HANDLERS ===========>
 
     # Maneja las conexiones entrantes de los clientes de manera asincrona
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        
+        # Obtenemos la información de la conexion del cliente
         addr = writer.get_extra_info('peername')
         
         # La tupla de addr tiene 2 elementos para IPv4 (host, port)
@@ -72,7 +77,7 @@ class MasterServer:
         )
 
         try:
-            # 1. Bucle de lectura de datos (¡ESTE ES EL ARREGLO!)
+            # 1. Bucle de lectura de datos
             data_chunks = []
             while True:
                 chunk = await reader.read(65536) # Leer en chunks de 64KB
@@ -87,18 +92,20 @@ class MasterServer:
                 logger.warning(f"No se recibieron datos de {addr}")
                 return
 
-            # 2. Ahora que tenemos TODOS los datos, decodificamos
+            # 2. Ahora que tenemos TODOS los datos, decodificamos y convertimos a JSON
             message_str = data.decode('utf-8')
             message = json.loads(message_str)
 
-            # 3. Procesamos el mensaje
+            # 3. Procesamos el mensaje y lo validos siguiendo los protocolos
             msg_type = message.get('type')
-            is_valid, error_msg = validate_message(message, msg_type) # Asumo que validate_message está importada
+            is_valid, error_msg = validate_message(message, msg_type) 
 
             if not is_valid:
                 logger.warning(f"Mensaje inválido de {addr}: {error_msg}", extra={'message': message})
                 response = {"status": "error", "message": error_msg}
             
+
+            # llamamos a la corrutina correspondiente al tipo de solicitud que llego al server
             elif msg_type == 'submit_job':
                 response = await self._handle_submit_job(message)
             elif msg_type == 'query_status':
@@ -139,7 +146,6 @@ class MasterServer:
             await writer.wait_closed()
 
 
-# <=========== HANDLERS ===========>
 
 
     #Procesa una peticion de trabajo de análisis genómico por parte del cliente
@@ -153,19 +159,20 @@ class MasterServer:
         logger.info(f"Job {job_id} recibido: {filename}, patrón: {pattern}", extra={'job_id': job_id, 'job_filename': filename, 'pattern': pattern, 'file_size': file_size})
 
         # --- VALIDACIONES RÁPIDAS ---
-        if not re.match(r'^[ACGT]+$', pattern):
+
+        if not re.match(r'^[ACGT]+$', pattern): # Si el archivo no esta compuesto por A, C, G, T
             logger.error(f"Patrón inválido recibido para job {job_id}: {pattern}", extra={'job_id': job_id, 'pattern': pattern})
             return {
                 "status": "error",
                 "message": f"Patrón inválido. Solo se permiten caracteres A, C, G, T. Patrón recibido: {pattern}"
             }
-        if len(pattern) < 2:
+        if len(pattern) < 2:  # si el patron es demasiado corto
             logger.error(f"Patrón demasiado corto para job {job_id}: {len(pattern)} caracteres", extra={'job_id': job_id})
             return {
                 "status": "error",
                 "message": f"El patrón debe tener al menos 2 caracteres. Longitud actual: {len(pattern)}"
             }
-        if len(pattern) > 100:
+        if len(pattern) > 100:   # si el patron es demasiado largo
             logger.error(f"Patrón demasiado largo para job {job_id}: {len(pattern)} caracteres", extra={'job_id': job_id})
             return {
                 "status": "error",
@@ -173,11 +180,12 @@ class MasterServer:
             }
         # --- FIN DE VALIDACIONES ---
 
-        # intento de solucionar el bug de condicion de carrera
+        
         total_chunks_estimate = (file_size // chunk_size) + 1
 
         try:
             # Guardar estado INICIAL del job en Redis (marcarlo como "encolando")
+            # con un hash del Job_ID que lo identifica
             await self.redis.hset(f"job:{job_id}", mapping={
                 "status": "queuing", # "queuing" (encolando) es el nuevo estado inicial
                 "filename": filename,
@@ -189,14 +197,13 @@ class MasterServer:
                 "file_size": file_size,
                 "chunk_size": chunk_size
             })
+
             await self.redis.expire(f"job:{job_id}", 3600 * 24)   # ttl, se limpia el archivo despues de 24 horas
 
             # Lanzamos el procesamiento pesado de fondo, no esperamos con el cliente a un await
             asyncio.create_task(self._process_job_background(message))
 
-            # Estimación de tiempo (esto es solo para la respuesta inicial)
-            # (total_chunks_estimate = file_size // chunk_size)
-            total_chunks_estimate = (file_size // chunk_size) + 1
+            # Tiempo estimado de ejecucion
             estimated_time = (total_chunks_estimate * 0.0013)
 
             logger.info(f"Job {job_id} aceptado para encolado en background.", extra={'job_id': job_id})
@@ -205,7 +212,7 @@ class MasterServer:
             return {
                 "status": "accepted",
                 "job_id": job_id,
-                "total_chunks": total_chunks_estimate, # Es una estimación, pero está bien
+                "total_chunks": total_chunks_estimate, 
                 "estimated_time": round(estimated_time, 2)
             }
         
@@ -214,7 +221,8 @@ class MasterServer:
             return {"status": "error", "message": f"Fallo al aceptar el trabajo: {e}"}
         
 
-    # Esta funcion se ejecuta en segundo plano para no bloquear al cliente mientras se procesan los chunks
+
+    # Esta corrutina se ejecuta en segundo plano para no bloquear al cliente mientras se procesan los chunks
     async def _process_job_background(self, message: Dict[str, Any]):
         job_id = message['job_id']
         pattern = message['pattern']
@@ -225,26 +233,24 @@ class MasterServer:
             # 1. Actualizar estado en Redis (rápido, no bloquea)
             await self.redis.hset(f"job:{job_id}", "status", "processing")
 
-            # 2. ¡¡¡AQUÍ ESTÁ EL ARREGLO!!!
-            # Ejecutamos la función bloqueante en un hilo separado.
+            # 2. Ejecutamos la función bloqueante en un hilo separado.
             # El 'await' aquí solo espera a que el hilo termine,
             # pero el event loop principal (servidor) sigue LIBRE.
             total_chunks, task_ids = await asyncio.to_thread(
-                self._blocking_enqueue_work,
+                self._blocking_enqueue_work,   # mandamos como hilo la tarea de encolado de chunks
                 job_id,
                 pattern,
                 chunk_size,
                 file_data_b64
             )
             
-            if total_chunks == -1: # significa que hubo un error
+            if total_chunks == -1: # significa que hubo un error  (ver return de excepcion de _blocking_enqueue_work)
                 raise Exception("Falló el _blocking_enqueue_work")
 
-            # 3. Actualizar Redis con la info final (rápido, no bloquea)
-            # (Nota: La línea 'hset("total_chunks")' ya la quitamos en el paso anterior, ¡lo cual es correcto!)
-            if task_ids:
-                await self.redis.rpush(f"job:{job_id}:task_ids", *task_ids)
-                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24)  # expira en 24 horas
+            # 3. Actualizar Redis con la info final 
+            if task_ids: # actualiza agregando los task_ids (uno por chunk)
+                await self.redis.rpush(f"job:{job_id}:task_ids", *task_ids)  
+                await self.redis.expire(f"job:{job_id}:task_ids", 3600 * 24)  # ttl, expira en 24 horas
 
             logger.info(f"Encolado en background (async) completado para job {job_id}. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
 
@@ -261,18 +267,18 @@ class MasterServer:
         (decodificar, dividir, encolar) para ser ejecutada en un hilo separado.
         """
         try:
-            # 2. Decodificar y hacer el trabajo pesado (esto tarda)
+            # 2. Decodificar y dividir en chunks con overlap (esto tarda)
             logger.info(f"Iniciando decodificación (bloqueante) para job {job_id}", extra={'job_id': job_id})
-            file_data = base64.b64decode(file_data_b64)
-            chunks_generator = divide_data_with_overlap(file_data, chunk_size=chunk_size)
+            file_data = base64.b64decode(file_data_b64)  # decodifica el archivo
+            chunks_generator = divide_data_with_overlap(file_data, chunk_size=chunk_size) # funcion de chunker.py
             
             total_chunks = 0
             task_ids = []
 
-            # 3. El bucle de encolado (esto es lo que no debe esperar el cliente)
+            # 3. El bucle de encolado de los chunks
             logger.info(f"Iniciando bucle de encolado (bloqueante) para job {job_id}", extra={'job_id': job_id})
             for chunk_id, chunk_data, metadata in chunks_generator:
-                chunk_data_b64_for_celery = base64.b64encode(chunk_data).decode('utf-8')
+                chunk_data_b64_for_celery = base64.b64encode(chunk_data).decode('utf-8')  # codifica los chunks
                 
                 # Pasamos el job_id al worker
                 metadata['job_id'] = job_id
@@ -284,20 +290,13 @@ class MasterServer:
                 task_ids.append(task.id)
                 total_chunks += 1
             
-            # Devolver los resultados para que la parte async los escriba
             logger.info(f"Encolado bloqueante completado para job {job_id}. Total chunks: {total_chunks}", extra={'job_id': job_id, 'total_chunks': total_chunks})
             
-            # Devolvemos los task_ids para que redis los guarde
-            if task_ids:
-                # Nota: Este 'redis' es síncrono. ¡Necesitamos pasarlo o crearlo!
-                # Para simplificar, devolvemos solo los task_ids y total_chunks
-                pass
-
             return total_chunks, task_ids
 
         except Exception as e:
             logger.error(f"Error en _blocking_enqueue_work para job {job_id}: {e}", exc_info=True, extra={'job_id': job_id})
-            # Devolvemos -1 o algo para indicar error
+            # Devolvemos -1 para indicar error
             return -1, []
 
 
@@ -307,14 +306,15 @@ class MasterServer:
         job_id = message['job_id']
         logger.info(f"Consulta de estado para job {job_id}", extra={'job_id': job_id})
 
-        job_info = await self.redis.hgetall(f"job:{job_id}")    # hgetall devuelve un diccionario con todos los jobs encolados
+# hgetall devuelve un diccionario con todos los jobs encolados (es como un select all de Redis)
+        job_info = await self.redis.hgetall(f"job:{job_id}")    
         if not job_info:
             return {"status": "error", "message": "Job ID no encontrado."}
 
         current_status = job_info.get("status", "unknown")
         total_chunks = int(job_info.get("total_chunks", 0))
         
-        # Leer directamente del hash (ya es atómico)
+        # Leer directamente del hash (mas rapido)
         processed_chunks = int(job_info.get("processed_chunks", 0))   
         
 
@@ -323,11 +323,10 @@ class MasterServer:
 
 
         # Este bloque sirve para calcular el total de matches con el patron que buscamos
-        # IMPORTANTE: deberiamos poner un contador dentro del Redis para no tener que recorrer la lista cada vez        
         # Leer contador atómico de matches
         total_matches = int(job_info.get("total_matches", 0))
 
-        # Si todos los chunks han sido procesados y el estado no es "completed", actualizarlo
+        # Si todos los chunks han sido procesados y el estado no es "completed" (por bug), actualizarlo
         if processed_chunks >= total_chunks and total_chunks > 0 and current_status == "processing":
             current_status = "completed"
             await self.redis.hset(f"job:{job_id}", "status", "completed")
@@ -347,19 +346,19 @@ class MasterServer:
             }
         }
 
-    # Maneja la notificación de un worker caído que manda el Collector.
     async def _handle_worker_down(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Maneja la notificación de un worker caído que manda el Collecto Server.
+        """
         
         worker_id = message['worker_id']
         timestamp = message['timestamp']
         
         logger.warning(f"Notificación de worker caído recibida: {worker_id} a las {timestamp}", extra={'worker_id': worker_id, 'timestamp': timestamp})
         
-        # Aquí el Master podría implementar lógica adicional si Celery no re-encolara automáticamente
-        # Por ahora, solo loggeamos y actualizamos el estado del worker en Redis si lo tuviéramos
-        # (El Collector ya se encarga de marcarlo como DEAD en su propia lógica)
         
-        # Opcional: Marcar el worker como caído en Redis para que el Master lo sepa
+        # Marcamos el worker como caído en Redis para que quede registro de que ha dejado de responder 
+        # de todas maneras del reencolamiento se encarga Celery con el "ack_late = True"
         await self.redis.hset(f"worker_status:{worker_id}", "status", "DEAD")
         await self.redis.hset(f"worker_status:{worker_id}", "last_down_timestamp", timestamp)
         
@@ -371,7 +370,7 @@ class MasterServer:
         Se ejecuta como tarea en background cada hora.
         """
         while True:
-            await asyncio.sleep(3600)  # Cada hora
+            await asyncio.sleep(3600)  # 3600 seg = 1 hora
             
             try:
                 logger.info("Iniciando limpieza de jobs antiguos en Redis")
@@ -415,17 +414,20 @@ class MasterServer:
             except Exception as e:
                 logger.error(f"Error en tarea de limpieza de jobs: {e}", exc_info=True)
 
-        # levantar el servidor Master
+    # levantar el servidor Master
     async def run(self):
-        self.redis = await get_redis_client()
+        self.redis = await get_redis_client()   # esperamos a obtener el cliente Redis
         
         # Iniciar tarea de limpieza en background
         logger.info("Iniciando tarea de limpieza de jobs antiguos")
         asyncio.create_task(self.cleanup_old_jobs())
         
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        addr = server.sockets[0].getsockname()   # obtener la dirección del socket TCP del servidor
-        logger.info(f"MasterServer escuchando en {addr}")
+        
+        for sock in server.sockets:
+            addr = sock.getsockname()
+            family_name = 'IPv6' if sock.family == socket.AF_INET6 else 'IPv4'
+            logger.info(f"MasterServer escuchando en {addr} (familia {family_name})")
 
         async with server:
             await server.serve_forever()
@@ -439,6 +441,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     master_server = MasterServer(port=args.port)
+    
     try:
         asyncio.run(master_server.run())
     except KeyboardInterrupt:  # Ctrl+C
