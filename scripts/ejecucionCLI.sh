@@ -4,7 +4,7 @@
 
 # Configuración
 FILE_PATH="data/genome_200MB.txt"
-PATTERN="ACCTGT"
+PATTERN="AGGTCCAT"
 LOG_DIR="./local_log"
 QUERY_INTERVAL=2 # Intervalo de consulta en segundos
 
